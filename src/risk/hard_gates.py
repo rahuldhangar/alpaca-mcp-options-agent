@@ -42,6 +42,14 @@ class TradeProposal(BaseModel):
     spread_slippage_pct: Optional[float] = Field(default=None, description="Bid-ask spread / mid-price fraction")
     spread_slippage_dollars: Optional[float] = Field(default=None, description="Absolute bid-ask spread in dollars")
 
+    # LLM Hypothesis & Metadata
+    thesis: Optional[str] = Field(default=None, description="Qualitative rationale and LLM hypothesis")
+    max_profit: Optional[float] = Field(default=None, description="Max potential dollar profit")
+    max_loss: Optional[float] = Field(default=None, description="Max potential dollar loss")
+    ivr: Optional[float] = Field(default=None, description="Implied Volatility Rank at proposal time")
+    regime: Optional[str] = Field(default=None, description="Market regime classification")
+    underlying: Optional[str] = Field(default=None, description="Underlying symbol alias")
+
     @property
     def total_capital_at_risk(self) -> float:
         """Total dollar capital exposed to maximum loss across all contracts."""
