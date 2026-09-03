@@ -22,22 +22,34 @@ class RiskGateViolationError(TradingSystemError):
 
     def __init__(
         self,
-        violation_type: str,
-        current_value: float,
-        limit_value: float,
+        violation_type: Optional[str] = None,
+        current_value: Optional[float] = None,
+        limit_value: Optional[float] = None,
         details: Optional[str] = None,
+        rule_name: Optional[str] = None,
+        reason: Optional[str] = None,
+        threshold_value: Optional[float] = None,
     ) -> None:
-        self.violation_type: str = violation_type
-        self.current_value: float = current_value
-        self.limit_value: float = limit_value
-        self.details: Optional[str] = details
-        msg = (
-            f"Risk boundary breached: {violation_type} "
-            f"(Current: {current_value:.4f}, Limit: {limit_value:.4f})"
-        )
-        if details:
-            msg += f" - {details}"
+        self.violation_type: str = violation_type or rule_name or "UNKNOWN_RULE"
+        self.current_value: Optional[float] = current_value
+        self.limit_value: Optional[float] = limit_value if limit_value is not None else threshold_value
+        self.details: Optional[str] = details or reason
+
+        val_str = f"{self.current_value:.4f}" if self.current_value is not None else "N/A"
+        lim_str = f"{self.limit_value:.4f}" if self.limit_value is not None else "N/A"
+        msg = f"Risk boundary breached: {self.violation_type} (Current: {val_str}, Limit: {lim_str})"
+        if self.details:
+            msg += f" - {self.details}"
         super().__init__(msg)
+
+
+class OrderExecutionError(TradingSystemError):
+    """Raised when an order fails during validation, submission, or fill processing."""
+
+    def __init__(self, order_id: str, reason: str) -> None:
+        self.order_id: str = order_id
+        self.reason: str = reason
+        super().__init__(f"Order execution error for '{order_id}': {reason}")
 
 
 class OCCFormattingError(TradingSystemError):
