@@ -1,0 +1,28 @@
+# Alpaca AI Trading Agents Hackathon — Project Dependencies
+# Target Python Version: >= 3.11
+
+# Alpaca Official Python SDK
+alpaca-py>=0.30.0
+
+# Data Validation & Serialization
+pydantic>=2.7.0
+
+# Quantitative Analysis & Options Greeks
+numpy>=1.26.0
+pandas>=2.2.0
+scipy>=1.13.0
+
+# Async Web & CLI Interface
+fastapi>=0.111.0
+uvicorn>=0.30.0
+typer>=0.12.0
+rich>=13.7.0
+
+# Environment & Configuration
+python-dotenv>=1.0.1
+
+# Testing & Verification
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+pytest-mock>=3.14.0
+pytest-cov>=5.0.0
