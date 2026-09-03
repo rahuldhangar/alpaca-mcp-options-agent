@@ -172,6 +172,22 @@ class Settings(BaseSettings):
         ],
         description="Active whitelist of liquid underlying instruments",
     )
+    EVALUATION_INTERVAL_SECONDS: int = Field(
+        default=30,
+        ge=5,
+        description="Default interval in seconds between trade opportunity evaluation cycles (minimum 5s floor)",
+    )
+    SCREENER_MIN_STOCK_PRICE: float = Field(
+        default=10.0,
+        ge=1.0,
+        description="Minimum share price for dynamic screener to ensure liquid OCC options chains exist",
+    )
+    DEFAULT_MOVERS_COUNT: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Default number of top market movers to ingest when bypassing whitelist",
+    )
 
     # --------------------------------------------------------------------------
     # Dynamic Credential Properties

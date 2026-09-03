@@ -36,6 +36,7 @@ from src.agents.strategist_agent import StrategistAgent
 from src.core.attribution_logger import AttributionLogger
 from src.core.config import settings
 from src.data.alpaca_stream import AlpacaStreamClient
+from src.data.market_scanner import MarketScanner, ScannedCandidate
 from src.data.regime_detector import MarketRegime, RegimeClassification, TrendDirection
 from src.execution.alpaca_client import AlpacaExecutionClient
 from src.execution.order_builder import build_bull_put_spread, build_iron_condor
@@ -94,6 +95,7 @@ def build_dashboard_renderable(
     llm_provider: str,
     llm_model: str,
     iteration: int = 1,
+    universe_label: str = "WHITELIST SCANNER (TOP 3 BY EDGE SCORE)",
 ) -> Panel:
     """Builds the comprehensive Rich terminal dashboard layout."""
     # 1. Badges & Header
@@ -129,21 +131,29 @@ def build_dashboard_renderable(
         f"[{equity_color}]DAILY REALIZED P&L\n{daily_pnl_str}[/]",
     )
 
-    # 3. Market Regimes Table
-    regime_table = Table(title="Live Market Regime Classification (IVR / ADX / Trend)", box=box.ROUNDED, expand=True)
+    # 3. Market Regimes Table with Dynamic Ranking & Edge Score
+    regime_table = Table(
+        title=f"Market Intelligence HUD | Universe: [bold yellow]{universe_label}[/bold yellow]",
+        box=box.ROUNDED,
+        expand=True,
+    )
+    regime_table.add_column("Rank", justify="center", style="bold yellow")
     regime_table.add_column("Ticker", style="bold white")
     regime_table.add_column("Last Price", justify="right")
     regime_table.add_column("52-Wk IVR", justify="center")
     regime_table.add_column("ADX (14)", justify="center")
+    regime_table.add_column("Edge Score", justify="center", style="bold cyan")
     regime_table.add_column("Classified Regime", style="bold")
     regime_table.add_column("Target Strategy", style="italic")
 
-    for ticker, info in regimes.items():
+    for rank, (ticker, info) in enumerate(regimes.items(), 1):
         regime_table.add_row(
+            f"#{rank}",
             ticker,
             info.get("price", "N/A"),
             info.get("ivr", "N/A"),
             info.get("adx", "N/A"),
+            info.get("edge_score", "N/A"),
             info.get("regime", "N/A"),
             info.get("strategy", "N/A"),
         )
@@ -234,6 +244,23 @@ def run_paper(
         "-m",
         help="LLM model identifier.",
     ),
+    bypass_whitelist: bool = typer.Option(
+        False,
+        "--bypass-whitelist",
+        "--bypass",
+        help="Bypasses TICKER_WHITELIST and dynamically scans top volatile market movers.",
+    ),
+    movers: int = typer.Option(
+        10,
+        "--movers",
+        help="Number of top volatile movers to scan when bypass is active (default: 10).",
+    ),
+    interval: Optional[int] = typer.Option(
+        None,
+        "--interval",
+        "-i",
+        help="Wait time in seconds between trade opportunity evaluations (default: 30s, min floor: 5s).",
+    ),
     mock: bool = typer.Option(
         False,
         "--mock",
@@ -253,19 +280,26 @@ def run_paper(
     active_provider = settings.LLM_PROVIDER
     active_model = settings.FEATHERLESS_MODEL if active_provider == "featherless" else settings.GEMINI_MODEL
 
+    # Enforce evaluation interval boundaries (minimum 5s safety floor)
+    eval_interval_seconds = interval if interval is not None else settings.EVALUATION_INTERVAL_SECONDS
+    if eval_interval_seconds < 5:
+        console.print(f"[yellow]Notice: --interval {eval_interval_seconds}s is below safety floor. Clamping to 5s minimum to protect API limits.[/yellow]")
+        eval_interval_seconds = 5
+    eval_frequency_ticks = max(1, round(eval_interval_seconds / 2.0))
+
+    market_scanner = MarketScanner(mock_mode=mock)
+
+    universe_type_str = f"DYNAMIC MOVERS (TOP {movers})" if bypass_whitelist else "WHITELIST SCANNER (TOP 10 RANKED)"
     console.print(f"[bold green]Initializing Autonomous Paper Trading Agent...[/bold green]")
     console.print(f"  Account:       [bold white]{active_account.upper()}[/bold white]")
     console.print(f"  LLM Provider:  [bold white]{active_provider.upper()}[/bold white] ({active_model})")
+    console.print(f"  Universe:      [bold magenta]{universe_type_str}[/bold magenta]")
+    console.print(f"  Eval Cadence:  [bold cyan]Every {eval_interval_seconds}s ({eval_frequency_ticks} ticks)[/bold cyan]")
     console.print(f"  Mode:          [bold yellow]{'MOCK SIMULATION' if mock else 'ALPACA LIVE PAPER'}[/bold yellow]")
     console.print(f"  Scoring Focus: [bold cyan]Total Account Equity ($100,000 Paper Account)[/bold cyan]\n")
 
     if mock:
         # Fast Mock Simulation Data for offline testing & UI demonstrations
-        sample_regimes = {
-            "SPY": {"price": "$562.40", "ivr": "58.4", "adx": "28.2", "regime": "[bold green]HIGH_IV_TRENDING[/]", "strategy": "Bull Put Credit Spread"},
-            "QQQ": {"price": "$481.15", "ivr": "64.1", "adx": "18.5", "regime": "[bold cyan]HIGH_IV_RANGEBOUND[/]", "strategy": "Iron Condor"},
-            "IWM": {"price": "$218.90", "ivr": "34.0", "adx": "14.2", "regime": "[bold yellow]LOW_IV_CHOP[/]", "strategy": "Preserve Cash (No Trade)"},
-        }
         active_spreads = [
             MonitoredSpread(
                 trade_id="trade-mock-spy",
@@ -310,90 +344,121 @@ def run_paper(
             console.print(f"[bold red]Failed to connect to Alpaca Paper Trading: {exc}[/bold red]")
             raise typer.Exit(code=1)
 
-        sample_regimes = {
-            "SPY": {"price": "$562.00", "ivr": "58.4", "adx": "28.2", "regime": "[bold green]HIGH_IV_TRENDING[/]", "strategy": "Bull Put Credit Spread"},
-            "QQQ": {"price": "$481.00", "ivr": "64.1", "adx": "18.5", "regime": "[bold cyan]HIGH_IV_RANGEBOUND[/]", "strategy": "Iron Condor"},
-            "IWM": {"price": "$218.00", "ivr": "34.0", "adx": "14.2", "regime": "[bold yellow]LOW_IV_CHOP[/]", "strategy": "Preserve Cash (No Trade)"},
-        }
         active_spreads = []
 
     iteration = 1
     with Live(console=console, screen=False, refresh_per_second=1) as live:
         try:
             while True:
+                # 1. Dynamic Market Scanning (Whitelist Ranking or Dynamic Movers)
+                if bypass_whitelist:
+                    universe_label = f"DYNAMIC VOLATILE MOVERS (TOP {movers})"
+                    scanned_candidates = asyncio.run(market_scanner.scan_volatile_market_movers(top_n=movers))
+                else:
+                    universe_label = "WHITELIST SCANNER (TOP 3 BY EDGE SCORE)"
+                    scanned_candidates = market_scanner.scan_whitelist_candidates()
+
+                displayed_regimes: Dict[str, Dict[str, str]] = {}
+                for cand in scanned_candidates[:3]:
+                    displayed_regimes[cand.symbol] = {
+                        "price": f"${cand.price:,.2f}",
+                        "ivr": f"{cand.ivr:.1f}",
+                        "adx": f"{cand.adx:.1f}",
+                        "edge_score": f"{cand.edge_score:.1f}",
+                        "regime": f"[bold green]{cand.regime}[/]" if "TRENDING" in cand.regime else (
+                            f"[bold cyan]{cand.regime}[/]" if "RANGEBOUND" in cand.regime else f"[bold yellow]{cand.regime}[/]"
+                        ),
+                        "strategy": cand.recommended_strategy,
+                    }
+
                 if not mock:
-                    # 1. Periodically refresh live account equity from Alpaca (every 5 iterations = 10s)
+                    # 2. Periodically refresh live account equity from Alpaca (every 5 iterations = 10s)
                     if iteration % 5 == 0:
                         try:
                             current_state = asyncio.run(execution_client.get_portfolio_state())
                         except Exception as exc:
                             logger.warning("Alpaca account state sync warning: %s", exc)
 
-                    # 2. Autonomous Trade Opportunity Formulation (Cycle #1 and every 15 iterations = 30s)
-                    if (iteration == 1 or iteration % 15 == 0) and len(monitor.get_tracked_spreads()) == 0:
+                    # 3. Autonomous Trade Opportunity Formulation with Strict Waterfall
+                    # Fires on iteration #1 and every eval_frequency_ticks
+                    if (iteration == 1 or iteration % eval_frequency_ticks == 0) and len(monitor.get_tracked_spreads()) == 0:
                         if current_state.margin_utilization_pct < 40.0:
-                            regime_obj = RegimeClassification(
-                                symbol="SPY",
-                                regime=MarketRegime.HIGH_IV_TRENDING,
-                                recommended_strategy="Bull Put Credit Spread",
-                                trend_direction=TrendDirection.BULLISH,
-                                confidence=0.85,
-                                current_iv=0.22,
-                                ivr=58.4,
-                                ivp=60.0,
-                                historical_vol_cc=0.15,
-                                historical_vol_parkinson=0.14,
-                                vol_premium=0.07,
-                                adx=28.2,
-                                plus_di=25.0,
-                                minus_di=15.0,
-                                ema_20=560.0,
-                                ema_50=555.0,
-                                ema_200=540.0,
-                            )
-                            try:
-                                proposal = asyncio.run(strategist.formulate_strategy(
-                                    underlying="SPY",
-                                    current_price=562.0,
-                                    regime=regime_obj,
-                                ))
-                                if proposal:
+                            # Strict Waterfall across scanned candidates in ranking order
+                            for candidate in scanned_candidates:
+                                if candidate.regime == "LOW_IV_CHOP":
+                                    continue
+
+                                regime_obj = RegimeClassification(
+                                    symbol=candidate.symbol,
+                                    regime=MarketRegime(candidate.regime),
+                                    recommended_strategy=candidate.recommended_strategy,
+                                    trend_direction=TrendDirection.BULLISH if candidate.percent_change >= 0 else TrendDirection.BEARISH,
+                                    confidence=0.85,
+                                    current_iv=candidate.ivr / 100.0,
+                                    ivr=candidate.ivr,
+                                    ivp=candidate.ivr,
+                                    historical_vol_cc=0.15,
+                                    historical_vol_parkinson=0.14,
+                                    vol_premium=0.07,
+                                    adx=candidate.adx,
+                                    plus_di=25.0,
+                                    minus_di=15.0,
+                                    ema_20=candidate.price * 0.99,
+                                    ema_50=candidate.price * 0.97,
+                                    ema_200=candidate.price * 0.95,
+                                )
+                                try:
+                                    proposal = asyncio.run(strategist.formulate_strategy(
+                                        underlying=candidate.symbol,
+                                        current_price=candidate.price,
+                                        regime=regime_obj,
+                                    ))
+                                    if not proposal:
+                                        continue
+
+                                    short_strike = round(candidate.price * 0.96, 1)
+                                    long_strike = round(candidate.price * 0.94, 1)
                                     order_req, validated_prop = build_bull_put_spread(
-                                        underlying="SPY",
+                                        underlying=candidate.symbol,
                                         expiration="2026-09-18",
-                                        short_strike=550.0,
-                                        long_strike=545.0,
+                                        short_strike=short_strike,
+                                        long_strike=long_strike,
                                         credit=1.20,
                                         quantity=1,
                                         dte=28,
                                     )
                                     risk_result = gatekeeper.verify_trade_proposal(validated_prop, current_state)
-                                    if risk_result.approved:
-                                        receipt = asyncio.run(execution_client.execute_spread_proposal(
-                                            order_request=order_req,
-                                            proposal=validated_prop,
-                                            state=current_state,
-                                        ))
-                                        spread_record = MonitoredSpread(
-                                            trade_id=receipt.order_id,
-                                            underlying="SPY",
-                                            strategy_name="Bull Put Credit Spread",
-                                            regime="HIGH_IV_TRENDING",
-                                            expiration_date="2026-09-18",
-                                            entry_credit=1.20,
-                                            contracts=1,
-                                            short_strike=550.0,
-                                            long_strike=545.0,
-                                            short_symbol="SPY260918P00550000",
-                                            long_symbol="SPY260918P00545000",
-                                            current_dte=28,
-                                        )
-                                        monitor.track_spread(spread_record)
-                                        logger.info("Live order submitted to Alpaca: %s", receipt.order_id)
-                            except Exception as exc:
-                                logger.error("Autonomous live trade evaluation notice: %s", exc)
+                                    if not risk_result.approved:
+                                        logger.info("Candidate %s rejected by risk gate: %s. Waterfalling to next.", candidate.symbol, risk_result.reason)
+                                        continue
 
-                    # 3. Evaluate monitored positions for automated 60% profit or 2.5x stop exits
+                                    receipt = asyncio.run(execution_client.execute_spread_proposal(
+                                        order_request=order_req,
+                                        proposal=validated_prop,
+                                        state=current_state,
+                                    ))
+                                    spread_record = MonitoredSpread(
+                                        trade_id=receipt.order_id,
+                                        underlying=candidate.symbol,
+                                        strategy_name=candidate.recommended_strategy,
+                                        regime=candidate.regime,
+                                        expiration_date="2026-09-18",
+                                        entry_credit=1.20,
+                                        contracts=1,
+                                        short_strike=short_strike,
+                                        long_strike=long_strike,
+                                        short_symbol=f"{candidate.symbol}260918P{int(short_strike*1000):08d}",
+                                        long_symbol=f"{candidate.symbol}260918P{int(long_strike*1000):08d}",
+                                        current_dte=28,
+                                    )
+                                    monitor.track_spread(spread_record)
+                                    logger.info("Live order submitted for %s on Alpaca: %s", candidate.symbol, receipt.order_id)
+                                    break  # Order placed! Waterfall fulfilled.
+                                except Exception as exc:
+                                    logger.warning("Execution attempt for %s failed (%s). Waterfalling to next candidate.", candidate.symbol, exc)
+                                    continue
+
+                    # 4. Evaluate monitored positions for automated exits & external reconciliation
                     try:
                         asyncio.run(monitor.evaluate_positions())
                     except Exception as exc:
@@ -404,12 +469,13 @@ def run_paper(
                 # Update dashboard panel
                 panel = build_dashboard_renderable(
                     state=current_state,
-                    regimes=sample_regimes,
+                    regimes=displayed_regimes,
                     monitored_spreads=active_spreads,
                     active_account=active_account,
                     llm_provider=active_provider,
                     llm_model=active_model,
                     iteration=iteration,
+                    universe_label=universe_label,
                 )
                 live.update(panel)
 
