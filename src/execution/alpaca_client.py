@@ -151,6 +151,17 @@ class AlpacaExecutionClient:
             logger.error("Failed to fetch account info from Alpaca: %s", exc)
             raise AlpacaAPIError("get_account", str(exc))
 
+    async def get_active_positions(self) -> List[Any]:
+        """Queries live positions directly from Alpaca."""
+        if self.mock_mode or not self._trading_client:
+            return []
+        try:
+            positions = await asyncio.to_thread(self._trading_client.get_all_positions)
+            return positions
+        except Exception as exc:
+            logger.error("Failed to fetch positions from Alpaca: %s", exc)
+            return []
+
     async def execute_spread_proposal(
         self,
         order_request: LimitOrderRequest,

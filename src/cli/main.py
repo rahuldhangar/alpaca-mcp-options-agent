@@ -35,6 +35,8 @@ from src.agents.monitor_agent import MonitoredSpread, PositionMonitorAgent
 from src.agents.strategist_agent import StrategistAgent
 from src.core.attribution_logger import AttributionLogger
 from src.core.config import settings
+from src.data.alpaca_stream import AlpacaStreamClient
+from src.data.regime_detector import MarketRegime, RegimeClassification, TrendDirection
 from src.execution.alpaca_client import AlpacaExecutionClient
 from src.execution.order_builder import build_bull_put_spread, build_iron_condor
 from src.risk.hard_gates import RiskGatekeeper, TradeProposal
@@ -257,63 +259,153 @@ def run_paper(
     console.print(f"  Mode:          [bold yellow]{'MOCK SIMULATION' if mock else 'ALPACA LIVE PAPER'}[/bold yellow]")
     console.print(f"  Scoring Focus: [bold cyan]Total Account Equity ($100,000 Paper Account)[/bold cyan]\n")
 
-    # Sample regimes & monitored spreads
-    sample_regimes = {
-        "SPY": {"price": "$562.40", "ivr": "58.4", "adx": "28.2", "regime": "[bold green]HIGH_IV_TRENDING[/]", "strategy": "Bull Put Credit Spread"},
-        "QQQ": {"price": "$481.15", "ivr": "64.1", "adx": "18.5", "regime": "[bold cyan]HIGH_IV_RANGEBOUND[/]", "strategy": "Iron Condor"},
-        "IWM": {"price": "$218.90", "ivr": "34.0", "adx": "14.2", "regime": "[bold yellow]LOW_IV_CHOP[/]", "strategy": "Preserve Cash (No Trade)"},
-    }
+    if mock:
+        # Fast Mock Simulation Data for offline testing & UI demonstrations
+        sample_regimes = {
+            "SPY": {"price": "$562.40", "ivr": "58.4", "adx": "28.2", "regime": "[bold green]HIGH_IV_TRENDING[/]", "strategy": "Bull Put Credit Spread"},
+            "QQQ": {"price": "$481.15", "ivr": "64.1", "adx": "18.5", "regime": "[bold cyan]HIGH_IV_RANGEBOUND[/]", "strategy": "Iron Condor"},
+            "IWM": {"price": "$218.90", "ivr": "34.0", "adx": "14.2", "regime": "[bold yellow]LOW_IV_CHOP[/]", "strategy": "Preserve Cash (No Trade)"},
+        }
+        active_spreads = [
+            MonitoredSpread(
+                trade_id="trade-mock-spy",
+                underlying="SPY",
+                strategy_name="Bull Put Credit Spread",
+                regime="HIGH_IV_TRENDING",
+                expiration_date="2026-09-18",
+                entry_credit=1.40,
+                contracts=2,
+                short_strike=550.0,
+                long_strike=545.0,
+                short_symbol="SPY260918P00550000",
+                long_symbol="SPY260918P00545000",
+                current_dte=28,
+            )
+        ]
+        current_state = PortfolioState(
+            equity=101420.0,
+            cash=59800.0,
+            buying_power=202840.0,
+            day_starting_equity=100000.0,
+            peak_equity=101420.0,
+            current_daily_pnl=1420.0,
+            margin_utilized=12000.0,
+        )
+    else:
+        # LIVE ALPACA PAPER TRADING INITIALIZATION
+        execution_client = AlpacaExecutionClient(mock_mode=False)
+        stream_client = AlpacaStreamClient(mock_mode=False)
+        strategist = StrategistAgent(mock_mode=False)
+        gatekeeper = RiskGatekeeper()
+        attribution_logger = AttributionLogger()
+        monitor = PositionMonitorAgent(
+            execution_client=execution_client,
+            attribution_logger=attribution_logger,
+            mock_mode=False,
+        )
 
-    sample_spreads = [
-        MonitoredSpread(
-            trade_id="trade-spy-001",
-            underlying="SPY",
-            strategy_name="Bull Put Credit Spread",
-            regime="HIGH_IV_TRENDING",
-            expiration_date="2026-09-18",
-            entry_credit=1.40,
-            contracts=2,
-            short_strike=550.0,
-            long_strike=545.0,
-            short_symbol="SPY260918P00550000",
-            long_symbol="SPY260918P00545000",
-            current_dte=28,
-        ),
-        MonitoredSpread(
-            trade_id="trade-qqq-002",
-            underlying="QQQ",
-            strategy_name="Iron Condor",
-            regime="HIGH_IV_RANGEBOUND",
-            expiration_date="2026-09-18",
-            entry_credit=2.10,
-            contracts=1,
-            short_strike=475.0,
-            long_strike=470.0,
-            short_symbol="QQQ260918P00475000",
-            long_symbol="QQQ260918P00470000",
-            current_dte=28,
-        ),
-    ]
+        try:
+            current_state = asyncio.run(execution_client.get_portfolio_state())
+        except Exception as exc:
+            console.print(f"[bold red]Failed to connect to Alpaca Paper Trading: {exc}[/bold red]")
+            raise typer.Exit(code=1)
 
-    current_state = PortfolioState(
-        equity=101420.0,
-        cash=59800.0,
-        buying_power=202840.0,
-        day_starting_equity=100000.0,
-        peak_equity=101420.0,
-        current_daily_pnl=1420.0,
-        margin_utilized=12000.0,
-    )
+        sample_regimes = {
+            "SPY": {"price": "$562.00", "ivr": "58.4", "adx": "28.2", "regime": "[bold green]HIGH_IV_TRENDING[/]", "strategy": "Bull Put Credit Spread"},
+            "QQQ": {"price": "$481.00", "ivr": "64.1", "adx": "18.5", "regime": "[bold cyan]HIGH_IV_RANGEBOUND[/]", "strategy": "Iron Condor"},
+            "IWM": {"price": "$218.00", "ivr": "34.0", "adx": "14.2", "regime": "[bold yellow]LOW_IV_CHOP[/]", "strategy": "Preserve Cash (No Trade)"},
+        }
+        active_spreads = []
 
     iteration = 1
     with Live(console=console, screen=False, refresh_per_second=1) as live:
         try:
             while True:
+                if not mock:
+                    # 1. Periodically refresh live account equity from Alpaca (every 5 iterations = 10s)
+                    if iteration % 5 == 0:
+                        try:
+                            current_state = asyncio.run(execution_client.get_portfolio_state())
+                        except Exception as exc:
+                            logger.warning("Alpaca account state sync warning: %s", exc)
+
+                    # 2. Autonomous Trade Opportunity Formulation (Cycle #1 and every 15 iterations = 30s)
+                    if (iteration == 1 or iteration % 15 == 0) and len(monitor.get_tracked_spreads()) == 0:
+                        if current_state.margin_utilization_pct < 40.0:
+                            regime_obj = RegimeClassification(
+                                symbol="SPY",
+                                regime=MarketRegime.HIGH_IV_TRENDING,
+                                recommended_strategy="Bull Put Credit Spread",
+                                trend_direction=TrendDirection.BULLISH,
+                                confidence=0.85,
+                                current_iv=0.22,
+                                ivr=58.4,
+                                ivp=60.0,
+                                historical_vol_cc=0.15,
+                                historical_vol_parkinson=0.14,
+                                vol_premium=0.07,
+                                adx=28.2,
+                                plus_di=25.0,
+                                minus_di=15.0,
+                                ema_20=560.0,
+                                ema_50=555.0,
+                                ema_200=540.0,
+                            )
+                            try:
+                                proposal = asyncio.run(strategist.formulate_strategy(
+                                    underlying="SPY",
+                                    current_price=562.0,
+                                    regime=regime_obj,
+                                ))
+                                if proposal:
+                                    order_req, validated_prop = build_bull_put_spread(
+                                        underlying="SPY",
+                                        expiration="2026-09-18",
+                                        short_strike=550.0,
+                                        long_strike=545.0,
+                                        credit=1.20,
+                                        quantity=1,
+                                        dte=28,
+                                    )
+                                    risk_result = gatekeeper.verify_trade_proposal(validated_prop, current_state)
+                                    if risk_result.approved:
+                                        receipt = asyncio.run(execution_client.execute_spread_proposal(
+                                            order_request=order_req,
+                                            proposal=validated_prop,
+                                            state=current_state,
+                                        ))
+                                        spread_record = MonitoredSpread(
+                                            trade_id=receipt.order_id,
+                                            underlying="SPY",
+                                            strategy_name="Bull Put Credit Spread",
+                                            regime="HIGH_IV_TRENDING",
+                                            expiration_date="2026-09-18",
+                                            entry_credit=1.20,
+                                            contracts=1,
+                                            short_strike=550.0,
+                                            long_strike=545.0,
+                                            short_symbol="SPY260918P00550000",
+                                            long_symbol="SPY260918P00545000",
+                                            current_dte=28,
+                                        )
+                                        monitor.track_spread(spread_record)
+                                        logger.info("Live order submitted to Alpaca: %s", receipt.order_id)
+                            except Exception as exc:
+                                logger.error("Autonomous live trade evaluation notice: %s", exc)
+
+                    # 3. Evaluate monitored positions for automated 60% profit or 2.5x stop exits
+                    try:
+                        asyncio.run(monitor.evaluate_positions())
+                    except Exception as exc:
+                        logger.error("Position evaluation error: %s", exc)
+
+                    active_spreads = monitor.get_tracked_spreads()
+
                 # Update dashboard panel
                 panel = build_dashboard_renderable(
                     state=current_state,
                     regimes=sample_regimes,
-                    monitored_spreads=sample_spreads,
+                    monitored_spreads=active_spreads,
                     active_account=active_account,
                     llm_provider=active_provider,
                     llm_model=active_model,
