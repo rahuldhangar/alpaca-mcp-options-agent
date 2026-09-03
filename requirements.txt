@@ -4,8 +4,13 @@
 # Alpaca Official Python SDK
 alpaca-py>=0.30.0
 
+# LLM Providers (OpenAI-compatible Featherless & Google Gemini)
+openai>=1.30.0
+google-genai>=0.1.0
+
 # Data Validation & Serialization
 pydantic>=2.7.0
+pydantic-settings>=2.2.0
 
 # Quantitative Analysis & Options Greeks
 numpy>=1.26.0
