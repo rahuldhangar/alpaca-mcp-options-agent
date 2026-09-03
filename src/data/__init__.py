@@ -15,6 +15,12 @@ from src.data.chain_parser import (
     parse_occ_symbol,
     OptionChainParser,
 )
+from src.data.regime_detector import (
+    MarketRegime,
+    TrendDirection,
+    RegimeClassification,
+    RegimeDetector,
+)
 
 __all__ = [
     "AlpacaStreamClient",
@@ -28,4 +34,8 @@ __all__ = [
     "ParsedOptionChain",
     "parse_occ_symbol",
     "OptionChainParser",
+    "MarketRegime",
+    "TrendDirection",
+    "RegimeClassification",
+    "RegimeDetector",
 ]
