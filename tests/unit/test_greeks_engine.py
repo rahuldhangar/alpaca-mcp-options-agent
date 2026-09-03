@@ -46,6 +46,91 @@ def test_black_scholes_known_benchmark_values() -> None:
     assert pytest.approx(parity_diff, abs=0.0001) == expected_parity
 
 
+def test_analytical_half_year_benchmark_values() -> None:
+    """
+    PROMPT-P05 Specification Benchmark:
+    Stock = 100.0, Strike = 100.0, T = 0.5 (6 months), r = 0.05, IV = 0.20
+    Expected Values:
+    Call Price = 6.8887
+    Put Price  = 4.4197
+    Call Delta = 0.5977
+    Put Delta  = -0.4023
+    """
+    s, k, t, r, sigma = 100.0, 100.0, 0.5, 0.05, 0.20
+
+    call_price = black_scholes_price(s, k, t, r, sigma, option_type="call")
+    put_price = black_scholes_price(s, k, t, r, sigma, option_type="put")
+
+    assert pytest.approx(call_price, abs=0.001) == 6.8887
+    assert pytest.approx(put_price, abs=0.001) == 4.4197
+
+    call_greeks = calculate_greeks(s, k, t, r, sigma, option_type="call")
+    put_greeks = calculate_greeks(s, k, t, r, sigma, option_type="put")
+
+    assert pytest.approx(call_greeks.delta, abs=0.001) == 0.5977
+    assert pytest.approx(put_greeks.delta, abs=0.001) == -0.4023
+    assert pytest.approx(call_price - put_price, abs=0.0001) == (s - k * math.exp(-r * t))
+
+
+def test_delta_strict_boundaries_across_spectrum() -> None:
+    """
+    PROMPT-P05 Specification:
+    Ensures Call Delta is strictly within [0.0, 1.0] and Put Delta is strictly within [-1.0, 0.0]
+    across an extensive grid of spots, strikes, and expirations.
+    """
+    spots = [20.0, 50.0, 100.0, 250.0, 500.0, 800.0]
+    strikes = [30.0, 50.0, 100.0, 200.0, 550.0, 750.0]
+    times = [1.0 / 365.0, 7.0 / 365.0, 30.0 / 365.0, 90.0 / 365.0, 1.0]
+    volatilities = [0.10, 0.25, 0.50, 0.90]
+
+    for s in spots:
+        for k in strikes:
+            for t in times:
+                for v in volatilities:
+                    cg = calculate_greeks(s, k, t, 0.045, v, "call")
+                    pg = calculate_greeks(s, k, t, 0.045, v, "put")
+
+                    assert 0.0 <= cg.delta <= 1.0, f"Call delta {cg.delta} violated [0, 1] at S={s}, K={k}"
+                    assert -1.0 <= pg.delta <= 0.0, f"Put delta {pg.delta} violated [-1, 0] at S={s}, K={k}"
+
+
+def test_asymptotic_convergence_deep_itm_and_otm() -> None:
+    """
+    PROMPT-P05 Specification:
+    Deep ITM and Deep OTM asymptotic behavior:
+    - Deep ITM Call: Price -> S - K*exp(-rT), Delta -> 1.0, Gamma -> 0.0
+    - Deep OTM Call: Price -> 0.0, Delta -> 0.0, Gamma -> 0.0
+    - Deep ITM Put:  Price -> K*exp(-rT) - S, Delta -> -1.0, Gamma -> 0.0
+    - Deep OTM Put:  Price -> 0.0, Delta -> 0.0, Gamma -> 0.0
+    """
+    k, t, r, vol = 100.0, 0.25, 0.05, 0.20
+    df = math.exp(-r * t)
+
+    # 1. Deep ITM Call (S = 1000, K = 100)
+    cg_itm = calculate_greeks(1000.0, k, t, r, vol, "call")
+    assert pytest.approx(cg_itm.theoretical_price, abs=0.01) == (1000.0 - k * df)
+    assert pytest.approx(cg_itm.delta, abs=0.0001) == 1.0
+    assert cg_itm.gamma < 1e-5
+
+    # 2. Deep OTM Call (S = 10, K = 100)
+    cg_otm = calculate_greeks(10.0, k, t, r, vol, "call")
+    assert pytest.approx(cg_otm.theoretical_price, abs=0.0001) == 0.0
+    assert pytest.approx(cg_otm.delta, abs=0.0001) == 0.0
+    assert cg_otm.gamma < 1e-5
+
+    # 3. Deep ITM Put (S = 10, K = 100)
+    pg_itm = calculate_greeks(10.0, k, t, r, vol, "put")
+    assert pytest.approx(pg_itm.theoretical_price, abs=0.01) == (k * df - 10.0)
+    assert pytest.approx(pg_itm.delta, abs=0.0001) == -1.0
+    assert pg_itm.gamma < 1e-5
+
+    # 4. Deep OTM Put (S = 1000, K = 100)
+    pg_otm = calculate_greeks(1000.0, k, t, r, vol, "put")
+    assert pytest.approx(pg_otm.theoretical_price, abs=0.0001) == 0.0
+    assert pytest.approx(pg_otm.delta, abs=0.0001) == 0.0
+    assert pg_otm.gamma < 1e-5
+
+
 def test_black_scholes_analytical_greeks_benchmarks() -> None:
     """
     Verifies analytical Greeks against known textbook benchmarks:
