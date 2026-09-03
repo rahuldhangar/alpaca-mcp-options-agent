@@ -146,7 +146,26 @@ class PositionMonitorAgent(BaseAgent):
         closed_records: List[TradeAttributionRecord] = []
         trades_to_close: List[Tuple[str, str, float]] = []
 
+        # 0. Check for external/manual closing on Alpaca
+        if self.execution_client and not self.mock_mode:
+            try:
+                live_positions = await self.execution_client.get_active_positions()
+                live_symbols = {getattr(p, "symbol", "") for p in live_positions}
+                for trade_id, spread in list(self._active_spreads.items()):
+                    if spread.short_symbol not in live_symbols and spread.long_symbol not in live_symbols:
+                        self.logger.info(
+                            "Position for %s (Trade ID: %s) closed externally on Alpaca. Reconciling.",
+                            spread.underlying,
+                            trade_id,
+                        )
+                        trades_to_close.append((trade_id, "EXTERNAL_MANUAL_CLOSE", spread.entry_credit))
+            except Exception as exc:
+                self.logger.error("Error checking live positions for reconciliation: %s", exc)
+
         for trade_id, spread in list(self._active_spreads.items()):
+            if any(t[0] == trade_id for t in trades_to_close):
+                continue
+
             # Determine current spread market price
             current_price = (
                 simulated_prices.get(trade_id)
@@ -223,8 +242,8 @@ class PositionMonitorAgent(BaseAgent):
         total_pnl = round(pnl_per_contract * spread.contracts, 2)
         pnl_pct = round((total_pnl / (spread.entry_credit * 100.0 * spread.contracts)) * 100.0, 1)
 
-        # Place closing order on Alpaca if client available
-        if self.execution_client:
+        # Place closing order on Alpaca if client available and not already closed externally
+        if self.execution_client and exit_reason != "EXTERNAL_MANUAL_CLOSE":
             try:
                 await self.execution_client.place_take_profit_close_order(
                     underlying=spread.underlying,
