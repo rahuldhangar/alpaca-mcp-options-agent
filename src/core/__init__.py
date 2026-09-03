@@ -10,6 +10,17 @@ from src.core.exceptions import (
     LLMProviderError,
     CircuitBreakerTriggeredError,
 )
+from src.core.event_bus import (
+    BaseEvent,
+    MarketTickEvent,
+    OptionsChainSnapshotEvent,
+    SignalEvent,
+    OrderProposalEvent,
+    OrderExecutionEvent,
+    FillEvent,
+    EventBus,
+    event_bus,
+)
 
 __all__ = [
     "Settings",
@@ -21,4 +32,13 @@ __all__ = [
     "AlpacaAPIError",
     "LLMProviderError",
     "CircuitBreakerTriggeredError",
+    "BaseEvent",
+    "MarketTickEvent",
+    "OptionsChainSnapshotEvent",
+    "SignalEvent",
+    "OrderProposalEvent",
+    "OrderExecutionEvent",
+    "FillEvent",
+    "EventBus",
+    "event_bus",
 ]
