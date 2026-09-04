@@ -26,6 +26,10 @@ rich>=13.7.0
 # Environment & Configuration
 python-dotenv>=1.0.1
 
+# Web Dashboard & Media Generation
+streamlit>=1.30.0
+edge-tts>=7.0.0
+
 # Testing & Verification
 pytest>=8.2.0
 pytest-asyncio>=0.23.0
