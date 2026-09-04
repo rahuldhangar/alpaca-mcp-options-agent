@@ -56,9 +56,23 @@ Our repository includes the complete, standalone technical specification in **[`
 
 ---
 
-## Terminal CLI Dashboard
+## Dual-Interface Experience: Web Dashboard & Terminal CLI
 
-The system features an interactive, zero-flicker terminal dashboard powered by Python `Rich` and `Typer`, providing real-time institutional visibility:
+OptionForge provides institutional observability through two complementary interfaces designed for distinct operational roles:
+
+### A. Streamlit Cloud Web Dashboard (Judge & Stakeholder Telemetry)
+- **Live Hosted URL:** [https://optionforge-alpaca-hackathon.streamlit.app/](https://optionforge-alpaca-hackathon.streamlit.app/)
+- **Target Audience:** Hackathon Judges, allocators, and public observers.
+- **Key Features:**
+  - **Live Account Metrics:** Real-time Total Account Equity ($100k competition focus), Cash, Options Buying Power, Margin Utilization, and Daily P&L directly from Alpaca.
+  - **Market Clock & Session Countdown:** Dynamic countdown timer showing exact hours, minutes, and seconds until exchange open/close or next trading evaluation cycle.
+  - **52-Week Volatility Edge Scanner:** Live tabular rankings of the liquid options universe with IVR, ADX, and regime classifications.
+  - **Active Positions Monitor:** Real-time tracking of open spreads with calculated 60% Take-Profit targets, 2.5x Stop-Loss ceilings, and days to expiration (DTE).
+  - **Interactive Featherless AI Strategy Playground:** Live prompt tester allowing judges to formulate real-time options hypotheses against open-source models (`Qwen/Qwen2.5-72B-Instruct`).
+
+### B. Terminal CLI Dashboard (Operator Real-Time HUD)
+- **Execution Interface:** Zero-flicker terminal HUD powered by Python `Rich` and `Typer`.
+- **Target Audience:** Quantitative traders, system operators, and automated background daemons.
 
 ```text
 ╭─────────────────────────────── ALPACA AUTONOMOUS OPTIONS TRADING SYSTEM | ACCOUNT: TEST / DEV  LLM: FEATHERLESS (Qwen/Qwen2.5-72B-Instruct) ──────────────────
@@ -79,6 +93,40 @@ The system features an interactive, zero-flicker terminal dashboard powered by P
 │ ╰───────────────────────────────────────────────────────────────────────────────────────╯ ╰────────────────────────────────────────────────────────────────────╯  
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ```
+
+### C. Architecture Separation of Concerns: Observability vs. Execution
+
+To guarantee high reliability, zero race conditions, and compliance with institutional standards, OptionForge enforces a strict **separation of concerns** between the Web Dashboard and the Trading Engine:
+
+```
+┌───────────────────────────────────────────────────────────────────────────────────────┐
+│                              OptionForge Topology                                     │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                       │
+│   [Execution Tier: Autonomous Trading Engine]        [Observability Tier: Web App]    │
+│   Command: python -m src.cli run-paper               Command: streamlit run ...       │
+│   Environment: Local Terminal / Cloud VPS / Docker   Environment: Streamlit Cloud     │
+│   Role: 24/7 Autonomous Execution Loop               Role: Stateless Telemetry Viewer │
+│   • Streams real-time market quotes                  • Read-only state viewer         │
+│   • 52-week IVR & ADX regime detection               • Live equity & P&L metrics      │
+│   • Featherless / Gemini trade formulation           • 52w IV volatility scanner HUD  │
+│   • Deterministic Hard Risk Gate enforcement         • Active spread monitor & P&L    │
+│   • Dynamic listed strike exchange snapping          • Real-time market clock         │
+│   • Dispatches live MLEG orders on Alpaca            • Interactive LLM tester         │
+│   • Tracks positions with 60% TP / 2.5x SL exits     • Zero trading loops / no race   │
+│                                                                                       │
+│                                           │                                           │
+│                                           ▼                                           │
+│                            [Alpaca Paper Trading Account]                             │
+│                         Dedicated $100k Official Account                              │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+> [!IMPORTANT]
+> **Why the Dashboard Does Not Directly Execute Trades:**
+> - **Web Session Isolation:** Browser-based UI frameworks (like Streamlit) are request-driven and stateless. If multiple judges visit the web app simultaneously, running an automated execution loop inside the web server would trigger duplicate orders, race conditions, and margin exhaustion.
+> - **Fault Isolation & 24/7 Resiliency:** The Autonomous Trading Agent runs independently as a persistent background process or terminal session. If a user closes the browser or refreshes the page, the trading bot continues monitoring open positions, enforcing risk gates, and harvesting profits without interruption.
+> - **Shared Broker Truth:** Both the Trading Agent and the Streamlit Dashboard communicate with the same Alpaca account. As soon as the agent submits an order or harvests profit, the Streamlit Dashboard immediately reflects the updated equity and positions.
 
 ---
 
@@ -186,49 +234,87 @@ GEMINI_MODEL=gemini-2.0-flash
 
 ---
 
-## CLI Usage Guide
+## How to Run: Web Dashboard vs. Real Autonomous Trading
 
-The CLI automatically handles virtual environment detection and provides turnkey commands:
+OptionForge is architected with a clean separation of concerns. You have two distinct execution components:
 
-### A. Inspect Account State & Balances
-Inspect equity, cash, buying power, and initial capital:
+### 1. Running the Streamlit Web Dashboard (Telemetry & Judge Interface)
+
+The Streamlit dashboard gives you real-time visual telemetry, displaying account equity, open positions, 52-week IV scanner rankings, market countdown clock, and the interactive Featherless AI strategy playground.
+
+- **Option A — Access the Hosted Cloud Dashboard (No Setup Required):**  
+  👉 **[https://optionforge-alpaca-hackathon.streamlit.app/](https://optionforge-alpaca-hackathon.streamlit.app/)**
+
+- **Option B — Run Locally on Your Machine:**  
+  ```bash
+  # Launch the Streamlit web dashboard in your browser
+  streamlit run streamlit_app.py
+  ```
+  *The dashboard opens automatically at `http://localhost:8501`. It connects to your configured Alpaca account and streams real-time data on demand.*
+
+---
+
+### 2. Running the Autonomous Trading Agent (Live Execution Engine)
+
+The Autonomous Trading Agent is the background engine that actively scans the market, formulates option spreads with Featherless AI / Gemini, validates trades against deterministic hard risk gates, dynamically snaps to real listed exchange strikes, and executes orders on Alpaca.
+
+#### Run in Interactive Foreground:
 ```bash
-# Test Account
-python src/cli/main.py inspect-account --account test
+# Official Hackathon Run on dedicated $100,000 Competition Account:
+python -m src.cli run-paper --account competition
 
-# Competition Account ($100,000 starting equity)
-python src/cli/main.py inspect-account --account competition
+# Run on Testing / Development Account with custom evaluation interval (e.g. 20s):
+python -m src.cli run-paper --account test --interval 20
+
+# Scan top volatile market movers by bypassing static whitelist:
+python -m src.cli run-paper --account competition --bypass --movers 10
+
+# Switch LLM Provider to Google Gemini:
+python -m src.cli run-paper --account competition --llm-provider gemini --model gemini-2.0-flash
 ```
 
-### B. Run Deterministic Risk Gate Test
-Executes an automated mathematical validation of the hard risk boundaries:
+#### Run as a Persistent 24/7 Background Process:
+To keep the Autonomous Agent trading continuously while you observe via Streamlit:
+
+- **On Windows (PowerShell Background Job):**
+  ```powershell
+  Start-Job -Name "OptionForgeAgent" -ScriptBlock {
+      Set-Location "C:\path\to\alpaca-mcp-options-agent"
+      .\.venv\Scripts\python -m src.cli run-paper --account competition
+  }
+  # Check status:
+  Get-Job -Name "OptionForgeAgent"
+  # Stop job:
+  Stop-Job -Name "OptionForgeAgent"
+  ```
+
+- **On Linux / macOS (nohup or tmux):**
+  ```bash
+  # Using nohup:
+  nohup python -m src.cli run-paper --account competition > trading.log 2>&1 &
+
+  # Or using tmux:
+  tmux new -s optionforge
+  python -m src.cli run-paper --account competition
+  # Press Ctrl+B then D to detach
+  ```
+
+---
+
+### 3. Inspection & Testing Tools
+
 ```bash
-python src/cli/main.py test-risk-gate
-```
+# Inspect live account balance, equity, and margin levels:
+python -m src.cli inspect-account --account competition
 
-### C. Run Paper Trading Simulation (Mock Mode)
-Execute a fast simulation without placing live orders:
-```bash
-python src/cli/main.py run-paper --mock --cycles 3
-```
+# Run deterministic hard risk gate boundary verification:
+python -m src.cli test-risk-gate
 
-### D. Run Live Autonomous Paper Trading
-Start the live autonomous trading agent:
-```bash
-# Standard run with Whitelist Scanner on Test Account (30s interval)
-python src/cli/main.py run-paper --account test --interval 30
+# Run offline paper trading simulation (mock mode):
+python -m src.cli run-paper --mock --cycles 3
 
-# Fast evaluation cadence (5-second floor)
-python src/cli/main.py run-paper --account test --interval 5
-
-# Bypass Whitelist: dynamically scan top 10 volatile market movers
-python src/cli/main.py run-paper --account test --bypass --movers 10
-
-# Switch LLM Provider to Google Gemini
-python src/cli/main.py run-paper --account test --llm-provider gemini --model gemini-2.0-flash
-
-# Official Competition Run ($100,000 dedicated account)
-python src/cli/main.py run-paper --account competition
+# View historical attribution report and win rate:
+python -m src.cli attribution-report
 ```
 
 ---
@@ -255,11 +341,12 @@ pytest -v
 
 **Verification Results:**
 ```text
-======================= 81 passed in 6.96s =======================
+======================= 83 passed, 1 warning in 7.29s =======================
 ```
 - Analytical Black-Scholes benchmark validation (Call/Put prices match closed-form formulas to $\pm 10^{-4}$).
 - Boundary conditions (Trade rejected at 5.01% capital risk; approved at 5.00%).
 - Delta, Gamma, Theta, and Vega asymptotes verified across deep ITM/OTM spectrum.
+- Dynamic exchange-listed strike snapping & OCC symbology verification (`find_real_option_spread_legs`).
 
 ---
 
