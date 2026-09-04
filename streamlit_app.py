@@ -112,22 +112,30 @@ def resolve_alpaca_credentials(account_selection: str):
                     st.secrets.get("ALPACA_COMPETITION_API_KEY")
                     or st.secrets.get("ALPACA_API_KEY_COMPETITION")
                     or st.secrets.get("ALPACA_API_KEY")
+                    or st.secrets.get("ALPACA_TEST_API_KEY")
+                    or st.secrets.get("ALPACA_API_KEY_TEST")
                 )
                 secret_key = (
                     st.secrets.get("ALPACA_COMPETITION_SECRET_KEY")
                     or st.secrets.get("ALPACA_SECRET_KEY_COMPETITION")
                     or st.secrets.get("ALPACA_SECRET_KEY")
+                    or st.secrets.get("ALPACA_TEST_SECRET_KEY")
+                    or st.secrets.get("ALPACA_SECRET_KEY_TEST")
                 )
             else:
                 api_key = (
                     st.secrets.get("ALPACA_TEST_API_KEY")
                     or st.secrets.get("ALPACA_API_KEY_TEST")
                     or st.secrets.get("ALPACA_API_KEY")
+                    or st.secrets.get("ALPACA_COMPETITION_API_KEY")
+                    or st.secrets.get("ALPACA_API_KEY_COMPETITION")
                 )
                 secret_key = (
                     st.secrets.get("ALPACA_TEST_SECRET_KEY")
                     or st.secrets.get("ALPACA_SECRET_KEY_TEST")
                     or st.secrets.get("ALPACA_SECRET_KEY")
+                    or st.secrets.get("ALPACA_COMPETITION_SECRET_KEY")
+                    or st.secrets.get("ALPACA_SECRET_KEY_COMPETITION")
                 )
     except Exception:
         pass
@@ -297,7 +305,7 @@ st.sidebar.caption("Autonomous Alpaca Options Alpha Agent")
 
 account_selection = st.sidebar.selectbox(
     "Alpaca Paper Account",
-    ["Development / Test Account", "Dedicated Competition Account ($100k)"],
+    ["Dedicated Competition Account ($100k)", "Development / Test Account"],
     index=0,
 )
 
