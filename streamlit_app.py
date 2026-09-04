@@ -131,6 +131,13 @@ def resolve_alpaca_credentials(account_selection: str):
     # 1. Try Streamlit Secrets first (for Streamlit Community Cloud)
     try:
         if hasattr(st, "secrets") and len(st.secrets) > 0:
+            if "FEATHERLESS_API_KEY" in st.secrets:
+                os.environ["FEATHERLESS_API_KEY"] = st.secrets["FEATHERLESS_API_KEY"]
+                settings.FEATHERLESS_API_KEY = st.secrets["FEATHERLESS_API_KEY"]
+            if "GEMINI_API_KEY" in st.secrets:
+                os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
+                settings.GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+
             if is_competition:
                 api_key = (
                     st.secrets.get("ALPACA_COMPETITION_API_KEY")
@@ -608,6 +615,63 @@ with tab4:
         st.markdown("- Black-Scholes rule solver")
         st.markdown("- 100% Operational Uptime")
         st.markdown("Guarantees continuous execution even during API rate limits or network outages.")
+
+    st.markdown("---")
+    st.subheader("⚡ Live LLM Strategist Playground")
+    st.caption("Trigger an on-demand serverless inference call directly to Featherless AI or Google Gemini.")
+
+    play_col1, play_col2 = st.columns([1, 2])
+    with play_col1:
+        test_sym = st.selectbox("Select Underlying Asset", settings.TICKER_WHITELIST, index=3)  # NVDA default
+        chosen_provider = "featherless" if "Featherless" in active_llm else "gemini"
+        trigger_btn = st.button("🚀 Formulate Live Options Hypothesis", width="stretch")
+
+    with play_col2:
+        if trigger_btn:
+            with st.spinner(f"Sending real-time prompt to {active_llm}..."):
+                try:
+                    from src.agents.strategist_agent import StrategistAgent
+                    from src.data.regime_detector import RegimeClassification, MarketRegime, TrendDirection
+                    import asyncio
+
+                    agent = StrategistAgent(provider=chosen_provider)
+                    live_regime = RegimeClassification(
+                        symbol=test_sym,
+                        regime=MarketRegime.HIGH_IV_TRENDING,
+                        recommended_strategy="Bull Put Credit Spread (0.25 Delta)",
+                        trend_direction=TrendDirection.BULLISH,
+                        confidence=0.88,
+                        current_iv=0.55,
+                        ivr=68.0,
+                        ivp=65.0,
+                        historical_vol_cc=0.45,
+                        historical_vol_parkinson=0.42,
+                        vol_premium=0.10,
+                        adx=32.0,
+                        plus_di=28.0,
+                        minus_di=14.0,
+                        ema_20=118.0,
+                        ema_50=112.0,
+                        ema_200=100.0,
+                    )
+                    prop = asyncio.run(agent.formulate_strategy(test_sym, 120.0, live_regime))
+                    if prop:
+                        st.success(f"✅ Strategy Formulated by **{active_llm}**")
+                        st.markdown(f"**Strategy:** `{prop.strategy_name}` | **Target Expiration:** `{prop.dte} DTE`")
+                        st.info(f"🧠 **AI Strategic Thesis:**\n\n{prop.thesis}")
+                        st.json({
+                            "proposal_id": prop.proposal_id,
+                            "symbol": prop.symbol,
+                            "strategy": prop.strategy_name,
+                            "target_credit": prop.target_credit_per_contract,
+                            "required_margin": prop.required_margin_per_contract,
+                            "dte": prop.dte,
+                            "regime": prop.regime,
+                        })
+                except Exception as exc:
+                    st.error(f"Live LLM formulation error: {exc}")
+        else:
+            st.info("💡 Select an underlying and click **Formulate Live Options Hypothesis** to execute a live API call to Featherless AI.")
 
 # TAB 5: System Logs
 with tab5:
