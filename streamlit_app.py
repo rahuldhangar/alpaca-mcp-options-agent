@@ -52,35 +52,59 @@ st.markdown(
     """
     <style>
     .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #ffffff;
+        font-size: 2.25rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
         margin-bottom: 0.2rem;
+        color: var(--text-color, #0f172a);
     }
+    @media (prefers-color-scheme: light) {
+        .main-header {
+            color: #0f172a !important;
+        }
+    }
+    @media (prefers-color-scheme: dark) {
+        .main-header {
+            color: #f8fafc !important;
+        }
+    }
+    [data-theme="light"] .main-header,
+    .stApp[data-theme="light"] .main-header {
+        color: #0f172a !important;
+    }
+    [data-theme="dark"] .main-header,
+    .stApp[data-theme="dark"] .main-header {
+        color: #f8fafc !important;
+    }
+
     .sub-header {
-        font-size: 1.0rem;
-        color: #10b981;
+        font-size: 1.05rem;
+        font-weight: 600;
+        color: #059669;
         margin-bottom: 1.2rem;
     }
     .badge-green {
-        background-color: #064e3b;
-        color: #34d399;
+        background-color: rgba(16, 185, 129, 0.15);
+        color: #059669;
+        border: 1px solid rgba(16, 185, 129, 0.3);
         padding: 3px 8px;
         border-radius: 4px;
         font-weight: 600;
         font-size: 0.85rem;
     }
     .badge-blue {
-        background-color: #0c4a6e;
-        color: #38bdf8;
+        background-color: rgba(14, 165, 233, 0.15);
+        color: #0284c7;
+        border: 1px solid rgba(14, 165, 233, 0.3);
         padding: 3px 8px;
         border-radius: 4px;
         font-weight: 600;
         font-size: 0.85rem;
     }
     .badge-gold {
-        background-color: #78350f;
-        color: #fde68a;
+        background-color: rgba(245, 158, 11, 0.15);
+        color: #d97706;
+        border: 1px solid rgba(245, 158, 11, 0.3);
         padding: 3px 8px;
         border-radius: 4px;
         font-weight: 600;
@@ -195,6 +219,55 @@ def fetch_live_account_data(api_key: str, secret_key: str):
 
     status_str = str(account.status).replace("AccountStatus.", "")
 
+    # Query Alpaca market clock for execution window countdown
+    clock_info = {
+        "is_open": False,
+        "market_label": "STANDBY",
+        "agent_state": "STANDBY",
+        "countdown_str": "9:30 AM ET (Market Open)",
+        "next_open_str": "09:30",
+        "session_msg": "Next window: 09:30 AM ET",
+        "timestamp_str": "Exchange Time",
+    }
+
+    try:
+        clock = client.get_clock()
+        is_open = bool(clock.is_open)
+        now_dt = clock.timestamp
+        next_open_dt = clock.next_open
+        next_close_dt = clock.next_close
+
+        if not is_open:
+            delta = next_open_dt - now_dt
+            secs = max(0, int(delta.total_seconds()))
+            h, rem = divmod(secs, 3600)
+            m, s = divmod(rem, 60)
+            countdown_str = f"{h}h {m}m" if h > 0 else f"{m}m {s}s"
+            market_label = "PRE-MARKET" if h < 6 else "AFTER-HOURS"
+            agent_state = "STANDBY"
+            session_msg = f"Opens in {countdown_str} ({next_open_dt.strftime('%H:%M')} ET)"
+        else:
+            delta = next_close_dt - now_dt
+            secs = max(0, int(delta.total_seconds()))
+            h, rem = divmod(secs, 3600)
+            m, s = divmod(rem, 60)
+            countdown_str = f"{h}h {m}m"
+            market_label = "RTH SESSION"
+            agent_state = "ACTIVE TRADING"
+            session_msg = f"Active • Closes in {countdown_str} (16:00 ET)"
+
+        clock_info = {
+            "is_open": is_open,
+            "market_label": market_label,
+            "agent_state": agent_state,
+            "countdown_str": countdown_str,
+            "next_open_str": next_open_dt.strftime("%H:%M"),
+            "session_msg": session_msg,
+            "timestamp_str": now_dt.strftime("%H:%M:%S ET"),
+        }
+    except Exception:
+        pass
+
     return {
         "equity": equity,
         "cash": cash,
@@ -205,6 +278,7 @@ def fetch_live_account_data(api_key: str, secret_key: str):
         "daily_pnl_pct": daily_pnl_pct,
         "status": status_str,
         "account_number": getattr(account, "account_number", "Alpaca-Paper"),
+        "clock": clock_info,
     }
 
 
@@ -389,13 +463,30 @@ with col4:
     )
 
 with col5:
+    clock = account_data.get("clock", {})
     st.metric(
-        label="Account Status",
-        value=account_data['status'],
-        delta="Live Paper API",
+        label="Market & Agent State",
+        value=f"{clock.get('agent_state', 'STANDBY')}",
+        delta=clock.get("session_msg", "Live Paper API"),
+        delta_color="normal" if clock.get("is_open") else "off",
     )
 
 st.markdown("---")
+
+# Dynamic Market State & Execution Countdown Banner
+clock = account_data.get("clock", {})
+if not clock.get("is_open", False):
+    st.info(
+        f"⏳ **Market Status: CLOSED ({clock.get('market_label', 'STANDBY')}) | Autonomous Agent: STANDBY MODE**  \n"
+        f"Options market orders are executed strictly during Regular Trading Hours (09:30 – 16:00 ET) to prevent wide pre-market bid-ask slippage.  \n"
+        f"**Next trade execution window opens in {clock.get('countdown_str', 'N/A')} (at {clock.get('next_open_str', '09:30')} ET).** Real-time indicative quote streams and risk monitors remain active."
+    )
+else:
+    st.success(
+        f"🟢 **Market Status: OPEN (Regular Trading Hours) | Autonomous Agent: ACTIVE TRADING MODE**  \n"
+        f"Autonomous trading loop is active. The engine is streaming real-time order books, calculating 52-week IV Rank, and evaluating defined-risk spreads through Deterministic Hard Risk Gates.  \n"
+        f"**Trading session closes in {clock.get('countdown_str', 'N/A')} (at 16:00 ET).**"
+    )
 
 # -----------------------------------------------------------------------------
 # Navigation Tabs
@@ -522,7 +613,11 @@ with tab4:
 with tab5:
     st.subheader("Live Alpaca Connectivity Status")
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    st.write(f"**Last Sync Timestamp:** `{now_str}`")
+    clock = account_data.get("clock", {})
+    st.write(f"**Exchange Clock:** `{clock.get('timestamp_str', 'N/A')}`")
+    st.write(f"**Market State:** `{clock.get('market_label', 'STANDBY')}` ({'OPEN' if clock.get('is_open') else 'CLOSED'})")
+    st.write(f"**Agent Execution State:** `{clock.get('agent_state', 'STANDBY')}`")
+    st.write(f"**Session Timeline:** `{clock.get('session_msg', 'N/A')}`")
     st.write(f"**Connected Base URL:** `{base_url}`")
     st.write(f"**Account Status:** `{account_data['status']}`")
     st.write(f"**Cash Available:** `${account_data['cash']:,.2f}`")
