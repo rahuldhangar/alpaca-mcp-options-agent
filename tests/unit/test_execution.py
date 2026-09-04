@@ -193,3 +193,65 @@ async def test_mcp_bridge_positions_and_contracts() -> None:
     # 3. Emergency cancel all
     cancel_res = await mcp_bridge.cancel_all_orders()
     assert cancel_res.get("status") == "success"
+
+
+@pytest.mark.asyncio
+async def test_find_real_option_spread_legs_mock() -> None:
+    """Verifies that find_real_option_spread_legs returns valid spread legs in mock mode."""
+    execution_client = AlpacaExecutionClient(mock_mode=True)
+
+    # Test Bull Put Spread in mock mode
+    put_legs = await execution_client.find_real_option_spread_legs(
+        underlying="NVDA",
+        current_price=128.50,
+        strategy="Bull Put Credit Spread",
+    )
+    assert put_legs is not None
+    assert put_legs["short_strike"] > put_legs["long_strike"]
+    assert put_legs["contract_type"] == "put"
+    assert "NVDA" in put_legs["short_symbol"]
+
+    # Test Bear Call Spread in mock mode
+    call_legs = await execution_client.find_real_option_spread_legs(
+        underlying="TSLA",
+        current_price=225.00,
+        strategy="Bear Call Credit Spread",
+    )
+    assert call_legs is not None
+    assert call_legs["short_strike"] < call_legs["long_strike"]
+    assert call_legs["contract_type"] == "call"
+    assert "TSLA" in call_legs["short_symbol"]
+
+
+@pytest.mark.asyncio
+async def test_find_real_option_spread_legs_with_client(mock_trading_client: MagicMock) -> None:
+    """Verifies that find_real_option_spread_legs selects listed strikes from TradingClient."""
+    from datetime import date, timedelta
+    from unittest.mock import MagicMock
+
+    today = date.today()
+    exp_date = today + timedelta(days=21)
+
+    c1 = MagicMock(symbol="SPY260925P00530000", strike_price=530.0, expiration_date=exp_date)
+    c2 = MagicMock(symbol="SPY260925P00535000", strike_price=535.0, expiration_date=exp_date)
+    c3 = MagicMock(symbol="SPY260925P00540000", strike_price=540.0, expiration_date=exp_date)
+
+    mock_resp = MagicMock()
+    mock_resp.option_contracts = [c1, c2, c3]
+    mock_trading_client.get_option_contracts.return_value = mock_resp
+
+    execution_client = AlpacaExecutionClient(trading_client=mock_trading_client, mock_mode=False)
+
+    legs = await execution_client.find_real_option_spread_legs(
+        underlying="SPY",
+        current_price=560.0,
+        strategy="Bull Put Credit Spread",
+    )
+
+    assert legs is not None
+    assert legs["short_strike"] == 535.0
+    assert legs["long_strike"] == 530.0
+    assert legs["short_symbol"] == "SPY260925P00535000"
+    assert legs["long_symbol"] == "SPY260925P00530000"
+    assert legs["dte"] == 21
+

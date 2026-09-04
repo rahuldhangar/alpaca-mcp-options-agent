@@ -5,20 +5,26 @@ deterministic risk interception, and automated take-profit order placement.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 from pydantic import BaseModel, Field
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import (
+    ContractType,
     OrderClass,
     OrderSide,
     OrderStatus,
     PositionIntent,
     TimeInForce,
 )
-from alpaca.trading.requests import LimitOrderRequest, OptionLegRequest, TakeProfitRequest
+from alpaca.trading.requests import (
+    GetOptionContractsRequest,
+    LimitOrderRequest,
+    OptionLegRequest,
+    TakeProfitRequest,
+)
 
 from src.core.config import settings
 from src.core.event_bus import (
@@ -356,3 +362,132 @@ class AlpacaExecutionClient:
         except Exception as exc:
             logger.error("Failed to place take-profit close order: %s", exc)
             raise OrderExecutionError(f"{underlying}_TP_CLOSE", str(exc))
+
+    async def find_real_option_spread_legs(
+        self,
+        underlying: str,
+        current_price: float,
+        strategy: str = "Bull Put Credit Spread",
+        min_dte: int = 14,
+        max_dte: int = 45,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Queries Alpaca's get_option_contracts endpoint to snap strikes to actual listed contracts
+        on the exchange within the target DTE window (14 - 45 DTE).
+
+        Returns a dictionary with:
+            - expiration: str (e.g. '2026-09-18')
+            - short_strike: float (e.g. 120.0)
+            - long_strike: float (e.g. 115.0)
+            - short_symbol: str (e.g. 'NVDA260918P00120000')
+            - long_symbol: str (e.g. 'NVDA260918P00115000')
+            - dte: int
+            - contract_type: 'put' or 'call'
+        or None if no liquid listed spread could be formed.
+        """
+        today = date.today()
+        is_put = "put" in strategy.lower() or "bull" in strategy.lower()
+        c_type = ContractType.PUT if is_put else ContractType.CALL
+        contract_type_str = "put" if is_put else "call"
+
+        if self.mock_mode or not self._trading_client:
+            # Deterministic fallback for mock testing
+            target_date = today + timedelta(days=28)
+            exp_str = target_date.strftime("%Y-%m-%d")
+            if is_put:
+                short_strike = round(current_price * 0.96, 0)
+                long_strike = round(current_price * 0.94, 0)
+                if short_strike <= long_strike:
+                    long_strike = short_strike - 5.0
+            else:
+                short_strike = round(current_price * 1.04, 0)
+                long_strike = round(current_price * 1.06, 0)
+                if long_strike <= short_strike:
+                    long_strike = short_strike + 5.0
+
+            short_sym = format_occ_symbol(underlying, exp_str, "P" if is_put else "C", short_strike, padded=False)
+            long_sym = format_occ_symbol(underlying, exp_str, "P" if is_put else "C", long_strike, padded=False)
+            return {
+                "expiration": exp_str,
+                "short_strike": float(short_strike),
+                "long_strike": float(long_strike),
+                "short_symbol": short_sym,
+                "long_symbol": long_sym,
+                "dte": 28,
+                "contract_type": contract_type_str,
+            }
+
+        try:
+            req = GetOptionContractsRequest(
+                underlying_symbols=[underlying.upper()],
+                status="active",
+                expiration_date_gte=today + timedelta(days=min_dte),
+                expiration_date_lte=today + timedelta(days=max_dte),
+                type=c_type,
+                limit=100,
+            )
+            res = await asyncio.to_thread(self._trading_client.get_option_contracts, req)
+            if not res or not getattr(res, "option_contracts", None) or len(res.option_contracts) < 2:
+                logger.warning(
+                    "No active %s contracts found on Alpaca for %s in DTE range %d-%d",
+                    contract_type_str,
+                    underlying,
+                    min_dte,
+                    max_dte,
+                )
+                return None
+
+            # Sort available expirations and pick the earliest liquid expiration
+            expirations = sorted(list(set(c.expiration_date for c in res.option_contracts)))
+            if not expirations:
+                return None
+
+            target_exp = expirations[0]
+            exp_contracts = [c for c in res.option_contracts if c.expiration_date == target_exp]
+            exp_contracts.sort(key=lambda x: float(x.strike_price))
+
+            if is_put:
+                # Bull Put Spread: Sell OTM Put ~4% below spot, Buy further OTM Put below short strike
+                target_short = current_price * 0.96
+                otm_puts = [c for c in exp_contracts if float(c.strike_price) <= target_short]
+                if not otm_puts:
+                    otm_puts = [c for c in exp_contracts if float(c.strike_price) < current_price]
+                if not otm_puts:
+                    return None
+
+                short_c = otm_puts[-1]  # Highest strike below target
+                long_candidates = [c for c in exp_contracts if float(c.strike_price) < float(short_c.strike_price)]
+                if not long_candidates:
+                    return None
+                long_c = long_candidates[-1]  # Next listed strike lower
+
+            else:
+                # Bear Call Spread: Sell OTM Call ~4% above spot, Buy further OTM Call above short strike
+                target_short = current_price * 1.04
+                otm_calls = [c for c in exp_contracts if float(c.strike_price) >= target_short]
+                if not otm_calls:
+                    otm_calls = [c for c in exp_contracts if float(c.strike_price) > current_price]
+                if not otm_calls:
+                    return None
+
+                short_c = otm_calls[0]  # Lowest strike above target
+                long_candidates = [c for c in exp_contracts if float(c.strike_price) > float(short_c.strike_price)]
+                if not long_candidates:
+                    return None
+                long_c = long_candidates[0]  # Next listed strike higher
+
+            dte_val = (target_exp - today).days
+            return {
+                "expiration": target_exp.strftime("%Y-%m-%d"),
+                "short_strike": float(short_c.strike_price),
+                "long_strike": float(long_c.strike_price),
+                "short_symbol": short_c.symbol,
+                "long_symbol": long_c.symbol,
+                "dte": dte_val,
+                "contract_type": contract_type_str,
+            }
+
+        except Exception as exc:
+            logger.error("Failed to query option contracts from Alpaca for %s: %s", underlying, exc)
+            return None
+

@@ -39,7 +39,7 @@ from src.data.alpaca_stream import AlpacaStreamClient
 from src.data.market_scanner import MarketScanner, ScannedCandidate
 from src.data.regime_detector import MarketRegime, RegimeClassification, TrendDirection
 from src.execution.alpaca_client import AlpacaExecutionClient
-from src.execution.order_builder import build_bull_put_spread, build_iron_condor
+from src.execution.order_builder import build_bear_call_spread, build_bull_put_spread, build_iron_condor
 from src.risk.hard_gates import RiskGatekeeper, TradeProposal
 from src.risk.portfolio_state import PortfolioState
 
@@ -416,17 +416,51 @@ def run_paper(
                                     if not proposal:
                                         continue
 
-                                    short_strike = round(candidate.price * 0.96, 1)
-                                    long_strike = round(candidate.price * 0.94, 1)
-                                    order_req, validated_prop = build_bull_put_spread(
+                                    # Dynamic real-world strike snapping from listed exchange contracts
+                                    real_legs = asyncio.run(execution_client.find_real_option_spread_legs(
                                         underlying=candidate.symbol,
-                                        expiration="2026-09-18",
-                                        short_strike=short_strike,
-                                        long_strike=long_strike,
-                                        credit=1.20,
-                                        quantity=1,
-                                        dte=28,
-                                    )
+                                        current_price=candidate.price,
+                                        strategy=candidate.recommended_strategy,
+                                        min_dte=14,
+                                        max_dte=45,
+                                    ))
+                                    if not real_legs:
+                                        logger.info(
+                                            "No active listed option contracts found for %s within 14-45 DTE. Waterfalling to next.",
+                                            candidate.symbol,
+                                        )
+                                        continue
+
+                                    short_strike = real_legs["short_strike"]
+                                    long_strike = real_legs["long_strike"]
+                                    expiration_str = real_legs["expiration"]
+                                    dte_val = real_legs["dte"]
+                                    strike_width = abs(short_strike - long_strike)
+                                    target_credit = min(1.20, round(strike_width * 0.30, 2))
+                                    if target_credit <= 0 or target_credit >= strike_width:
+                                        target_credit = round(strike_width * 0.25, 2)
+
+                                    if real_legs.get("contract_type") == "call":
+                                        order_req, validated_prop = build_bear_call_spread(
+                                            underlying=candidate.symbol,
+                                            expiration=expiration_str,
+                                            short_strike=short_strike,
+                                            long_strike=long_strike,
+                                            credit=target_credit,
+                                            quantity=1,
+                                            dte=dte_val,
+                                        )
+                                    else:
+                                        order_req, validated_prop = build_bull_put_spread(
+                                            underlying=candidate.symbol,
+                                            expiration=expiration_str,
+                                            short_strike=short_strike,
+                                            long_strike=long_strike,
+                                            credit=target_credit,
+                                            quantity=1,
+                                            dte=dte_val,
+                                        )
+
                                     risk_result = gatekeeper.verify_trade_proposal(validated_prop, current_state)
                                     if not risk_result.approved:
                                         logger.info("Candidate %s rejected by risk gate: %s. Waterfalling to next.", candidate.symbol, risk_result.reason)
@@ -440,16 +474,16 @@ def run_paper(
                                     spread_record = MonitoredSpread(
                                         trade_id=receipt.order_id,
                                         underlying=candidate.symbol,
-                                        strategy_name=candidate.recommended_strategy,
+                                        strategy_name=validated_prop.strategy_name,
                                         regime=candidate.regime,
-                                        expiration_date="2026-09-18",
-                                        entry_credit=1.20,
+                                        expiration_date=expiration_str,
+                                        entry_credit=target_credit,
                                         contracts=1,
                                         short_strike=short_strike,
                                         long_strike=long_strike,
-                                        short_symbol=f"{candidate.symbol}260918P{int(short_strike*1000):08d}",
-                                        long_symbol=f"{candidate.symbol}260918P{int(long_strike*1000):08d}",
-                                        current_dte=28,
+                                        short_symbol=real_legs["short_symbol"],
+                                        long_symbol=real_legs["long_symbol"],
+                                        current_dte=dte_val,
                                     )
                                     monitor.track_spread(spread_record)
                                     logger.info("Live order submitted for %s on Alpaca: %s", candidate.symbol, receipt.order_id)

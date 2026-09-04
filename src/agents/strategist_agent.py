@@ -177,7 +177,12 @@ class StrategistAgent(BaseAgent):
                     temperature=0.2,
                     max_tokens=800,
                 )
-                content = response.choices[0].message.content or ""
+                if not response or not getattr(response, "choices", None) or len(response.choices) == 0:
+                    raise ValueError("Featherless returned an empty response or empty choices list.")
+                first_choice = response.choices[0]
+                if not first_choice or not getattr(first_choice, "message", None):
+                    raise ValueError("Featherless response choice missing message structure.")
+                content = getattr(first_choice.message, "content", "") or ""
                 return content.strip()
 
             except Exception as exc:
