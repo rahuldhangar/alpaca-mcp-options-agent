@@ -69,6 +69,37 @@ class ExecutionReceipt(BaseModel):
     )
 
 
+class MarketClockState(BaseModel):
+    """Market clock representation for US regular trading hours (RTH)."""
+
+    is_open: bool = Field(description="True if regular market trading is open")
+    next_open: Optional[datetime] = Field(default=None, description="Next market session open datetime")
+    next_close: Optional[datetime] = Field(default=None, description="Next market session close datetime")
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Current exchange timestamp",
+    )
+
+    @property
+    def countdown_to_open_str(self) -> str:
+        """Formats remaining time until next_open as e.g. '1d 19h 10m' or '2h 15m'."""
+        if self.is_open or not self.next_open:
+            return "0m"
+        diff = self.next_open - self.timestamp
+        total_seconds = int(diff.total_seconds())
+        if total_seconds <= 0:
+            return "0m"
+        days, remainder = divmod(total_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+        if days > 0:
+            return f"{days}d {hours}h {minutes}m"
+        elif hours > 0:
+            return f"{hours}h {minutes}m"
+        else:
+            return f"{minutes}m"
+
+
 class AlpacaExecutionClient:
     """
     Hybrid Execution Engine connecting autonomous agents to the Alpaca Trading API.
@@ -156,6 +187,38 @@ class AlpacaExecutionClient:
         except Exception as exc:
             logger.error("Failed to fetch account info from Alpaca: %s", exc)
             raise AlpacaAPIError("get_account", str(exc))
+
+    async def get_market_clock(self) -> MarketClockState:
+        """
+        Queries Alpaca's market clock to determine if regular trading hours are active.
+        In mock mode or if client is unavailable, returns mock open state.
+        """
+        if self.mock_mode or not self._trading_client:
+            now = datetime.now(timezone.utc)
+            return MarketClockState(
+                is_open=True,
+                next_open=now,
+                next_close=now + timedelta(hours=6, minutes=30),
+                timestamp=now,
+            )
+
+        try:
+            clock = await asyncio.to_thread(self._trading_client.get_clock)
+            return MarketClockState(
+                is_open=bool(clock.is_open),
+                next_open=clock.next_open,
+                next_close=clock.next_close,
+                timestamp=clock.timestamp,
+            )
+        except Exception as exc:
+            logger.warning("Failed to fetch Alpaca market clock: %s. Defaulting to open.", exc)
+            now = datetime.now(timezone.utc)
+            return MarketClockState(
+                is_open=True,
+                next_open=now,
+                next_close=now + timedelta(hours=6, minutes=30),
+                timestamp=now,
+            )
 
     async def get_active_positions(self) -> List[Any]:
         """Queries live positions directly from Alpaca."""

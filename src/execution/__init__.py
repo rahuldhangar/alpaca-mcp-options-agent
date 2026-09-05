@@ -10,6 +10,7 @@ from src.execution.order_builder import (
 from src.execution.alpaca_client import (
     AlpacaExecutionClient,
     ExecutionReceipt,
+    MarketClockState,
 )
 from src.execution.mcp_bridge import (
     AlpacaMCPBridge,
@@ -26,6 +27,7 @@ __all__ = [
     "build_iron_condor",
     "AlpacaExecutionClient",
     "ExecutionReceipt",
+    "MarketClockState",
     "AlpacaMCPBridge",
     "MCPAccountInfo",
     "MCPPosition",

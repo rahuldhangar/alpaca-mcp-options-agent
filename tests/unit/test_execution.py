@@ -11,7 +11,11 @@ from alpaca.trading.enums import OrderClass, OrderSide, PositionIntent
 from alpaca.trading.requests import LimitOrderRequest
 
 from src.core.exceptions import RiskGateViolationError
-from src.execution.alpaca_client import AlpacaExecutionClient, ExecutionReceipt
+from src.execution.alpaca_client import (
+    AlpacaExecutionClient,
+    ExecutionReceipt,
+    MarketClockState,
+)
 from src.execution.mcp_bridge import (
     AlpacaMCPBridge,
     MCPAccountInfo,
@@ -254,4 +258,95 @@ async def test_find_real_option_spread_legs_with_client(mock_trading_client: Mag
     assert legs["short_symbol"] == "SPY260925P00535000"
     assert legs["long_symbol"] == "SPY260925P00530000"
     assert legs["dte"] == 21
+
+
+# ------------------------------------------------------------------------------
+# 3. Market Clock and RTH State Tests
+# ------------------------------------------------------------------------------
+
+def test_market_clock_countdown_formatting() -> None:
+    """Verifies MarketClockState formats human-readable countdowns accurately."""
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    # When open: always 0m
+    open_clock = MarketClockState(is_open=True, timestamp=now, next_open=now + timedelta(days=2))
+    assert open_clock.countdown_to_open_str == "0m"
+
+    # Days + hours + minutes
+    closed_clock_days = MarketClockState(
+        is_open=False,
+        timestamp=now,
+        next_open=now + timedelta(days=2, hours=3, minutes=15),
+    )
+    assert closed_clock_days.countdown_to_open_str == "2d 3h 15m"
+
+    # Hours + minutes
+    closed_clock_hours = MarketClockState(
+        is_open=False,
+        timestamp=now,
+        next_open=now + timedelta(hours=4, minutes=45),
+    )
+    assert closed_clock_hours.countdown_to_open_str == "4h 45m"
+
+    # Minutes only
+    closed_clock_minutes = MarketClockState(
+        is_open=False,
+        timestamp=now,
+        next_open=now + timedelta(minutes=25),
+    )
+    assert closed_clock_minutes.countdown_to_open_str == "25m"
+
+
+@pytest.mark.asyncio
+async def test_get_market_clock_mock_mode() -> None:
+    """In mock mode, get_market_clock returns open state without network calls."""
+    execution_client = AlpacaExecutionClient(mock_mode=True)
+    clock_state = await execution_client.get_market_clock()
+
+    assert isinstance(clock_state, MarketClockState)
+    assert clock_state.is_open is True
+    assert clock_state.next_open is not None
+    assert clock_state.next_close is not None
+
+
+@pytest.mark.asyncio
+async def test_get_market_clock_with_trading_client(mock_trading_client: MagicMock) -> None:
+    """Verifies that get_market_clock queries trading_client and parses closed hours."""
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime(2026, 9, 5, 20, 0, 0, tzinfo=timezone.utc)
+    next_open = now + timedelta(days=2, hours=13, minutes=30)
+    next_close = next_open + timedelta(hours=6, minutes=30)
+
+    mock_clock = MagicMock()
+    mock_clock.is_open = False
+    mock_clock.next_open = next_open
+    mock_clock.next_close = next_close
+    mock_clock.timestamp = now
+    mock_trading_client.get_clock.return_value = mock_clock
+
+    execution_client = AlpacaExecutionClient(trading_client=mock_trading_client, mock_mode=False)
+    clock_state = await execution_client.get_market_clock()
+
+    assert isinstance(clock_state, MarketClockState)
+    assert clock_state.is_open is False
+    assert clock_state.next_open == next_open
+    assert clock_state.next_close == next_close
+    assert clock_state.countdown_to_open_str == "2d 13h 30m"
+    mock_trading_client.get_clock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_market_clock_fallback_on_exception(mock_trading_client: MagicMock) -> None:
+    """Verifies that API errors default to open gracefully without throwing."""
+    mock_trading_client.get_clock.side_effect = RuntimeError("Alpaca rate limit or 500 error")
+
+    execution_client = AlpacaExecutionClient(trading_client=mock_trading_client, mock_mode=False)
+    clock_state = await execution_client.get_market_clock()
+
+    assert isinstance(clock_state, MarketClockState)
+    assert clock_state.is_open is True
+
 

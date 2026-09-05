@@ -11,7 +11,7 @@ Commands:
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
@@ -38,7 +38,7 @@ from src.core.config import settings
 from src.data.alpaca_stream import AlpacaStreamClient
 from src.data.market_scanner import MarketScanner, ScannedCandidate
 from src.data.regime_detector import MarketRegime, RegimeClassification, TrendDirection
-from src.execution.alpaca_client import AlpacaExecutionClient
+from src.execution.alpaca_client import AlpacaExecutionClient, MarketClockState
 from src.execution.order_builder import build_bear_call_spread, build_bull_put_spread, build_iron_condor
 from src.risk.hard_gates import RiskGatekeeper, TradeProposal
 from src.risk.portfolio_state import PortfolioState
@@ -96,6 +96,8 @@ def build_dashboard_renderable(
     llm_model: str,
     iteration: int = 1,
     universe_label: str = "WHITELIST SCANNER (TOP 3 BY EDGE SCORE)",
+    clock_state: Optional[MarketClockState] = None,
+    force_eval: bool = False,
 ) -> Panel:
     """Builds the comprehensive Rich terminal dashboard layout."""
     # 1. Badges & Header
@@ -109,6 +111,15 @@ def build_dashboard_renderable(
         if llm_provider == "featherless"
         else f"[bold white on purple] LLM: GEMINI ({llm_model}) [/]"
     )
+    if force_eval:
+        market_badge = "[bold white on magenta] [FORCE-EVAL ACTIVE] [/]"
+    elif clock_state and clock_state.is_open:
+        market_badge = "[bold white on dark_green] [OPEN] MARKET OPEN (RTH) [/]"
+    elif clock_state:
+        market_badge = f"[bold white on dark_red] [STANDBY] MARKET CLOSED [/] [bold yellow]Next Open: {clock_state.countdown_to_open_str}[/]"
+    else:
+        market_badge = "[dim][?] MARKET: UNKNOWN[/dim]"
+
     utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # 2. Main KPI Panel: Prominent Total Account Equity (Official Scoring Metric)
@@ -171,9 +182,9 @@ def build_dashboard_renderable(
 
     if not monitored_spreads:
         pos_table.add_row(
-            "—",
+            "-",
             "[dim italic]No active positions. Capital safely preserved in cash.[/dim italic]",
-            "—", "—", "—", "—", "—", "—"
+            "-", "-", "-", "-", "-", "-"
         )
     else:
         for s in monitored_spreads:
@@ -205,12 +216,29 @@ def build_dashboard_renderable(
 
     # Assembly
     content = Table.grid(expand=True, padding=(1, 0))
+
+    if force_eval:
+        force_banner = (
+            f"[bold magenta][FORCE-EVAL ACTIVE]:[/bold magenta] Market-hours gate is [bold white]BYPASSED[/bold white] (Testing/Evaluation Mode).\n"
+            f"  [dim]* Autonomous LLM strategy formulation active regardless of exchange status.[/dim]"
+        )
+        content.add_row(Panel(force_banner, border_style="magenta"))
+    elif clock_state and not clock_state.is_open:
+        next_open_str = clock_state.next_open.strftime("%A, %b %d at %H:%M %Z") if clock_state.next_open else "TBD"
+        standby_banner = (
+            f"[bold yellow]STANDBY MODE ACTIVE:[/bold yellow] US Options Exchange is currently [bold red]CLOSED[/bold red].\n"
+            f"  Next Session Opens in: [bold cyan]{clock_state.countdown_to_open_str}[/bold cyan] ({next_open_str})\n"
+            f"  [dim]* Automated LLM trade formulation and order submissions are paused to protect API quota.\n"
+            f"  * Loop throttled to 30s sleep interval. (Pass [bold white]--force-eval[/bold white] to force trade formulation outside regular hours).[/dim]"
+        )
+        content.add_row(Panel(standby_banner, border_style="yellow"))
+
     content.add_row(Panel(kpi_table, border_style="cyan", title="[bold white]Portfolio & Equity Metrics[/]"))
     content.add_row(regime_table)
     content.add_row(pos_table)
     content.add_row(risk_table)
 
-    header_text = f"{account_badge}   {provider_badge}   [dim]Cycle: #{iteration} | {utc_now}[/dim]"
+    header_text = f"{account_badge}   {provider_badge}   {market_badge}   [dim]Cycle: #{iteration} | {utc_now}[/dim]"
     main_panel = Panel(
         content,
         title=f"[bold yellow]ALPACA AUTONOMOUS OPTIONS TRADING SYSTEM[/bold yellow] | {header_text}",
@@ -272,6 +300,12 @@ def run_paper(
         "-c",
         help="Number of evaluation cycles to execute before exiting (default: infinite loop).",
     ),
+    force_eval: bool = typer.Option(
+        False,
+        "--force-eval",
+        "--ignore-market-hours",
+        help="Forces trade evaluation and LLM formulation even when the market is closed (for testing/development).",
+    ),
 ) -> None:
     """Starts autonomous paper trading monitoring loop with live Rich terminal dashboard."""
     configure_runtime_environment(account, llm_provider, model)
@@ -296,6 +330,8 @@ def run_paper(
     console.print(f"  Universe:      [bold magenta]{universe_type_str}[/bold magenta]")
     console.print(f"  Eval Cadence:  [bold cyan]Every {eval_interval_seconds}s ({eval_frequency_ticks} ticks)[/bold cyan]")
     console.print(f"  Mode:          [bold yellow]{'MOCK SIMULATION' if mock else 'ALPACA LIVE PAPER'}[/bold yellow]")
+    if force_eval:
+        console.print(f"  Override:      [bold magenta][FORCE-EVAL ACTIVE] (Market hours gate bypassed)[/bold magenta]")
     console.print(f"  Scoring Focus: [bold cyan]Total Account Equity ($100,000 Paper Account)[/bold cyan]\n")
 
     if mock:
@@ -346,157 +382,185 @@ def run_paper(
 
         active_spreads = []
 
+    clock_state: Optional[MarketClockState] = None
+    scanned_candidates: List[ScannedCandidate] = []
+    displayed_regimes: Dict[str, Dict[str, str]] = {}
     iteration = 1
     with Live(console=console, screen=False, refresh_per_second=1) as live:
         try:
             while True:
-                # 1. Dynamic Market Scanning (Whitelist Ranking or Dynamic Movers)
-                if bypass_whitelist:
-                    universe_label = f"DYNAMIC VOLATILE MOVERS (TOP {movers})"
-                    scanned_candidates = asyncio.run(market_scanner.scan_volatile_market_movers(top_n=movers))
+                # 0. Market Hours Clock Verification
+                if mock:
+                    now = datetime.now(timezone.utc)
+                    clock_state = MarketClockState(
+                        is_open=True,
+                        next_open=now,
+                        next_close=now + timedelta(hours=6, minutes=30),
+                        timestamp=now,
+                    )
                 else:
-                    universe_label = "WHITELIST SCANNER (TOP 3 BY EDGE SCORE)"
-                    scanned_candidates = market_scanner.scan_whitelist_candidates()
+                    # Refresh clock on iteration 1, or every iteration in standby (30s sleep),
+                    # or every 15 iterations in active trading (30s at 2s sleep)
+                    clock_refresh_ticks = 1 if (clock_state and not clock_state.is_open) else 15
+                    if iteration == 1 or iteration % clock_refresh_ticks == 0:
+                        try:
+                            clock_state = asyncio.run(execution_client.get_market_clock())
+                        except Exception as exc:
+                            logger.warning("Alpaca market clock check failed: %s", exc)
 
-                displayed_regimes: Dict[str, Dict[str, str]] = {}
-                for cand in scanned_candidates[:3]:
-                    displayed_regimes[cand.symbol] = {
-                        "price": f"${cand.price:,.2f}",
-                        "ivr": f"{cand.ivr:.1f}",
-                        "adx": f"{cand.adx:.1f}",
-                        "edge_score": f"{cand.edge_score:.1f}",
-                        "regime": f"[bold green]{cand.regime}[/]" if "TRENDING" in cand.regime else (
-                            f"[bold cyan]{cand.regime}[/]" if "RANGEBOUND" in cand.regime else f"[bold yellow]{cand.regime}[/]"
-                        ),
-                        "strategy": cand.recommended_strategy,
-                    }
+                is_market_active = (clock_state.is_open if clock_state else True) or force_eval
+
+                # 1. Dynamic Market Scanning (Scan on iteration 1 or whenever market is active)
+                if is_market_active or iteration == 1 or not scanned_candidates:
+                    if bypass_whitelist:
+                        universe_label = f"DYNAMIC VOLATILE MOVERS (TOP {movers})"
+                        scanned_candidates = asyncio.run(market_scanner.scan_volatile_market_movers(top_n=movers))
+                    else:
+                        universe_label = "WHITELIST SCANNER (TOP 3 BY EDGE SCORE)"
+                        scanned_candidates = market_scanner.scan_whitelist_candidates()
+
+                    displayed_regimes = {}
+                    for cand in scanned_candidates[:3]:
+                        displayed_regimes[cand.symbol] = {
+                            "price": f"${cand.price:,.2f}",
+                            "ivr": f"{cand.ivr:.1f}",
+                            "adx": f"{cand.adx:.1f}",
+                            "edge_score": f"{cand.edge_score:.1f}",
+                            "regime": f"[bold green]{cand.regime}[/]" if "TRENDING" in cand.regime else (
+                                f"[bold cyan]{cand.regime}[/]" if "RANGEBOUND" in cand.regime else f"[bold yellow]{cand.regime}[/]"
+                            ),
+                            "strategy": cand.recommended_strategy,
+                        }
 
                 if not mock:
-                    # 2. Periodically refresh live account equity from Alpaca (every 5 iterations = 10s)
-                    if iteration % 5 == 0:
+                    # 2. Periodically refresh live account equity from Alpaca (every 5 active iterations or every standby iteration)
+                    equity_refresh_ticks = 1 if not is_market_active else 5
+                    if iteration % equity_refresh_ticks == 0:
                         try:
                             current_state = asyncio.run(execution_client.get_portfolio_state())
                         except Exception as exc:
                             logger.warning("Alpaca account state sync warning: %s", exc)
 
                     # 3. Autonomous Trade Opportunity Formulation with Strict Waterfall
-                    # Fires on iteration #1 and every eval_frequency_ticks
-                    if (iteration == 1 or iteration % eval_frequency_ticks == 0) and len(monitor.get_tracked_spreads()) == 0:
-                        if current_state.margin_utilization_pct < 40.0:
-                            # Strict Waterfall across scanned candidates in ranking order
-                            for candidate in scanned_candidates:
-                                if candidate.regime == "LOW_IV_CHOP":
-                                    continue
-
-                                regime_obj = RegimeClassification(
-                                    symbol=candidate.symbol,
-                                    regime=MarketRegime(candidate.regime),
-                                    recommended_strategy=candidate.recommended_strategy,
-                                    trend_direction=TrendDirection.BULLISH if candidate.percent_change >= 0 else TrendDirection.BEARISH,
-                                    confidence=0.85,
-                                    current_iv=candidate.ivr / 100.0,
-                                    ivr=candidate.ivr,
-                                    ivp=candidate.ivr,
-                                    historical_vol_cc=0.15,
-                                    historical_vol_parkinson=0.14,
-                                    vol_premium=0.07,
-                                    adx=candidate.adx,
-                                    plus_di=25.0,
-                                    minus_di=15.0,
-                                    ema_20=candidate.price * 0.99,
-                                    ema_50=candidate.price * 0.97,
-                                    ema_200=candidate.price * 0.95,
-                                )
-                                try:
-                                    proposal = asyncio.run(strategist.formulate_strategy(
-                                        underlying=candidate.symbol,
-                                        current_price=candidate.price,
-                                        regime=regime_obj,
-                                    ))
-                                    if not proposal:
+                    # GATED TO REGULAR MARKET HOURS (or explicit --force-eval override)
+                    if is_market_active:
+                        if (iteration == 1 or iteration % eval_frequency_ticks == 0) and len(monitor.get_tracked_spreads()) == 0:
+                            if current_state.margin_utilization_pct < 40.0:
+                                # Strict Waterfall across scanned candidates in ranking order
+                                for candidate in scanned_candidates:
+                                    if candidate.regime == "LOW_IV_CHOP":
                                         continue
 
-                                    # Dynamic real-world strike snapping from listed exchange contracts
-                                    real_legs = asyncio.run(execution_client.find_real_option_spread_legs(
-                                        underlying=candidate.symbol,
-                                        current_price=candidate.price,
-                                        strategy=candidate.recommended_strategy,
-                                        min_dte=14,
-                                        max_dte=45,
-                                    ))
-                                    if not real_legs:
-                                        logger.info(
-                                            "No active listed option contracts found for %s within 14-45 DTE. Waterfalling to next.",
-                                            candidate.symbol,
-                                        )
-                                        continue
-
-                                    short_strike = real_legs["short_strike"]
-                                    long_strike = real_legs["long_strike"]
-                                    expiration_str = real_legs["expiration"]
-                                    dte_val = real_legs["dte"]
-                                    strike_width = abs(short_strike - long_strike)
-                                    target_credit = min(1.20, round(strike_width * 0.30, 2))
-                                    if target_credit <= 0 or target_credit >= strike_width:
-                                        target_credit = round(strike_width * 0.25, 2)
-
-                                    if real_legs.get("contract_type") == "call":
-                                        order_req, validated_prop = build_bear_call_spread(
-                                            underlying=candidate.symbol,
-                                            expiration=expiration_str,
-                                            short_strike=short_strike,
-                                            long_strike=long_strike,
-                                            credit=target_credit,
-                                            quantity=1,
-                                            dte=dte_val,
-                                        )
-                                    else:
-                                        order_req, validated_prop = build_bull_put_spread(
-                                            underlying=candidate.symbol,
-                                            expiration=expiration_str,
-                                            short_strike=short_strike,
-                                            long_strike=long_strike,
-                                            credit=target_credit,
-                                            quantity=1,
-                                            dte=dte_val,
-                                        )
-
-                                    risk_result = gatekeeper.verify_trade_proposal(validated_prop, current_state)
-                                    if not risk_result.approved:
-                                        logger.info("Candidate %s rejected by risk gate: %s. Waterfalling to next.", candidate.symbol, risk_result.reason)
-                                        continue
-
-                                    receipt = asyncio.run(execution_client.execute_spread_proposal(
-                                        order_request=order_req,
-                                        proposal=validated_prop,
-                                        state=current_state,
-                                    ))
-                                    spread_record = MonitoredSpread(
-                                        trade_id=receipt.order_id,
-                                        underlying=candidate.symbol,
-                                        strategy_name=validated_prop.strategy_name,
-                                        regime=candidate.regime,
-                                        expiration_date=expiration_str,
-                                        entry_credit=target_credit,
-                                        contracts=1,
-                                        short_strike=short_strike,
-                                        long_strike=long_strike,
-                                        short_symbol=real_legs["short_symbol"],
-                                        long_symbol=real_legs["long_symbol"],
-                                        current_dte=dte_val,
+                                    regime_obj = RegimeClassification(
+                                        symbol=candidate.symbol,
+                                        regime=MarketRegime(candidate.regime),
+                                        recommended_strategy=candidate.recommended_strategy,
+                                        trend_direction=TrendDirection.BULLISH if candidate.percent_change >= 0 else TrendDirection.BEARISH,
+                                        confidence=0.85,
+                                        current_iv=candidate.ivr / 100.0,
+                                        ivr=candidate.ivr,
+                                        ivp=candidate.ivr,
+                                        historical_vol_cc=0.15,
+                                        historical_vol_parkinson=0.14,
+                                        vol_premium=0.07,
+                                        adx=candidate.adx,
+                                        plus_di=25.0,
+                                        minus_di=15.0,
+                                        ema_20=candidate.price * 0.99,
+                                        ema_50=candidate.price * 0.97,
+                                        ema_200=candidate.price * 0.95,
                                     )
-                                    monitor.track_spread(spread_record)
-                                    logger.info("Live order submitted for %s on Alpaca: %s", candidate.symbol, receipt.order_id)
-                                    break  # Order placed! Waterfall fulfilled.
-                                except Exception as exc:
-                                    logger.warning("Execution attempt for %s failed (%s). Waterfalling to next candidate.", candidate.symbol, exc)
-                                    continue
+                                    try:
+                                        proposal = asyncio.run(strategist.formulate_strategy(
+                                            underlying=candidate.symbol,
+                                            current_price=candidate.price,
+                                            regime=regime_obj,
+                                        ))
+                                        if not proposal:
+                                            continue
+
+                                        # Dynamic real-world strike snapping from listed exchange contracts
+                                        real_legs = asyncio.run(execution_client.find_real_option_spread_legs(
+                                            underlying=candidate.symbol,
+                                            current_price=candidate.price,
+                                            strategy=candidate.recommended_strategy,
+                                            min_dte=14,
+                                            max_dte=45,
+                                        ))
+                                        if not real_legs:
+                                            logger.info(
+                                                "No active listed option contracts found for %s within 14-45 DTE. Waterfalling to next.",
+                                                candidate.symbol,
+                                            )
+                                            continue
+
+                                        short_strike = real_legs["short_strike"]
+                                        long_strike = real_legs["long_strike"]
+                                        expiration_str = real_legs["expiration"]
+                                        dte_val = real_legs["dte"]
+                                        strike_width = abs(short_strike - long_strike)
+                                        target_credit = min(1.20, round(strike_width * 0.30, 2))
+                                        if target_credit <= 0 or target_credit >= strike_width:
+                                            target_credit = round(strike_width * 0.25, 2)
+
+                                        if real_legs.get("contract_type") == "call":
+                                            order_req, validated_prop = build_bear_call_spread(
+                                                underlying=candidate.symbol,
+                                                expiration=expiration_str,
+                                                short_strike=short_strike,
+                                                long_strike=long_strike,
+                                                credit=target_credit,
+                                                quantity=1,
+                                                dte=dte_val,
+                                            )
+                                        else:
+                                            order_req, validated_prop = build_bull_put_spread(
+                                                underlying=candidate.symbol,
+                                                expiration=expiration_str,
+                                                short_strike=short_strike,
+                                                long_strike=long_strike,
+                                                credit=target_credit,
+                                                quantity=1,
+                                                dte=dte_val,
+                                            )
+
+                                        risk_result = gatekeeper.verify_trade_proposal(validated_prop, current_state)
+                                        if not risk_result.approved:
+                                            logger.info("Candidate %s rejected by risk gate: %s. Waterfalling to next.", candidate.symbol, risk_result.reason)
+                                            continue
+
+                                        receipt = asyncio.run(execution_client.execute_spread_proposal(
+                                            order_request=order_req,
+                                            proposal=validated_prop,
+                                            state=current_state,
+                                        ))
+                                        spread_record = MonitoredSpread(
+                                            trade_id=receipt.order_id,
+                                            underlying=candidate.symbol,
+                                            strategy_name=validated_prop.strategy_name,
+                                            regime=candidate.regime,
+                                            expiration_date=expiration_str,
+                                            entry_credit=target_credit,
+                                            contracts=1,
+                                            short_strike=short_strike,
+                                            long_strike=long_strike,
+                                            short_symbol=real_legs["short_symbol"],
+                                            long_symbol=real_legs["long_symbol"],
+                                            current_dte=dte_val,
+                                        )
+                                        monitor.track_spread(spread_record)
+                                        logger.info("Live order submitted for %s on Alpaca: %s", candidate.symbol, receipt.order_id)
+                                        break  # Order placed! Waterfall fulfilled.
+                                    except Exception as exc:
+                                        logger.warning("Execution attempt for %s failed (%s). Waterfalling to next candidate.", candidate.symbol, exc)
+                                        continue
 
                     # 4. Evaluate monitored positions for automated exits & external reconciliation
-                    try:
-                        asyncio.run(monitor.evaluate_positions())
-                    except Exception as exc:
-                        logger.error("Position evaluation error: %s", exc)
+                    if len(monitor.get_tracked_spreads()) > 0:
+                        try:
+                            asyncio.run(monitor.evaluate_positions())
+                        except Exception as exc:
+                            logger.error("Position evaluation error: %s", exc)
 
                     active_spreads = monitor.get_tracked_spreads()
 
@@ -510,13 +574,17 @@ def run_paper(
                     llm_model=active_model,
                     iteration=iteration,
                     universe_label=universe_label,
+                    clock_state=clock_state,
+                    force_eval=force_eval,
                 )
                 live.update(panel)
 
                 if cycles and iteration >= cycles:
                     break
 
-                time.sleep(2.0)
+                # Sleep duration: 30s during Standby Mode (market closed), 2s during active market trading
+                loop_sleep = 30.0 if not is_market_active else 2.0
+                time.sleep(loop_sleep)
                 iteration += 1
 
         except KeyboardInterrupt:

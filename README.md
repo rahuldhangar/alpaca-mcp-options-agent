@@ -271,7 +271,16 @@ python -m src.cli run-paper --account competition --bypass --movers 10
 
 # Switch LLM Provider to Google Gemini:
 python -m src.cli run-paper --account competition --llm-provider gemini --model gemini-2.0-flash
+
+# Force off-hours evaluation / testing when market is closed:
+python -m src.cli run-paper --account test --cycles 1 --force-eval
 ```
+
+> [!NOTE]
+> **Market-Hours Gate & Standby Mode:**  
+> When the US Options Exchange is closed (nights, weekends, holidays), OptionForge automatically enters **Standby Mode**—pausing Featherless/Gemini LLM strategy formulation calls, stopping new order placement, and throttling the loop sleep interval to 30 seconds to conserve API quotas and eliminate redundant CPU usage. The terminal HUD displays a prominent `[STANDBY] MARKET CLOSED` banner and a countdown to the next session open.  
+> To evaluate hypotheses or test LLM prompts during off-hours, pass `--force-eval` (or `--ignore-market-hours`).
+
 
 #### Run as a Persistent 24/7 Background Process:
 To keep the Autonomous Agent trading continuously while you observe via Streamlit:
