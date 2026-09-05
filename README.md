@@ -53,6 +53,7 @@ Our repository includes the complete, standalone technical specification in **[`
   - **Low-IV Chop (IVR < 25, ADX < 20):** **Cash Preservation Mode**—system halts new position initiation to protect capital.
 - **Strict OCC Symbology & Zero Hallucinations:** Every contract is parsed and formatted to the exact 21-character Options Clearing Corporation standard (e.g. `SPY260918P00550000`). Inverted strikes, phantom expirations, and malformed symbols are rejected mathematically before order construction.
 - **Dynamic Market Scanner & Volatile Movers Bypass:** Continuously screens the 10 liquid whitelisted assets (`SPY`, `QQQ`, `IWM`, `NVDA`, `AAPL`, `MSFT`, `TSLA`, `AMZN`, `GOOGL`, `META`) by 52-week edge score, or dynamically bypasses the whitelist via `--bypass` to scan the day's top volatile market movers.
+- **Market-Hours Gating & Zero Quota Wastage:** Ingests exchange clock state via Alpaca `TradingClient.get_clock()`. When the options exchange closes, OptionForge automatically enters **Standby Mode**—pausing all LLM strategy formulation calls to Featherless and Gemini (0 API calls wasted), pausing order submissions, and throttling the execution loop to 30.0s sleep intervals with real-time countdown telemetry. Developer override `--force-eval` allows off-hours testing on demand.
 
 ---
 
@@ -350,12 +351,13 @@ pytest -v
 
 **Verification Results:**
 ```text
-======================= 83 passed, 1 warning in 7.29s =======================
+======================= 89 passed, 1 warning in 9.55s =======================
 ```
 - Analytical Black-Scholes benchmark validation (Call/Put prices match closed-form formulas to $\pm 10^{-4}$).
 - Boundary conditions (Trade rejected at 5.01% capital risk; approved at 5.00%).
 - Delta, Gamma, Theta, and Vega asymptotes verified across deep ITM/OTM spectrum.
 - Dynamic exchange-listed strike snapping & OCC symbology verification (`find_real_option_spread_legs`).
+- Market clock RTH verification, Standby Mode 0-call gating, countdown formatting, and `--force-eval` bypass.
 
 ---
 
@@ -364,6 +366,12 @@ pytest -v
 - **Paper Trading Environment:** This project is built and tested strictly in Alpaca's paper trading sandbox. Paper trading is a simulation and does not involve real capital or actual financial risk. Past simulated performance is hypothetical and does not guarantee future results.
 - **Options Trading Notice:** Options trading involves substantial risk and is not suitable for all investors. Mathematical risk models and algorithmic strategies cannot eliminate market volatility or execution slippage.
 - **Brokerage Infrastructure:** Brokerage services are provided by Alpaca Securities LLC (member FINRA/SIPC).
+
+---
+
+## Release History & Changelog
+
+For an exhaustive chronological audit trail of all architecture milestones, features, quantitative upgrades, and fixes, see **[`CHANGELOG.md`](./CHANGELOG.md)**.
 
 ---
 
